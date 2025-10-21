@@ -18,7 +18,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+static_files = StaticFiles(directory="static", html=True)
+
+app.mount("/static", static_files, name="static")
+
+
+@app.get("/")
+async def serve_index():
+    return await static_files.get_response("index.html")
 
 
 class Translation(BaseModel):
