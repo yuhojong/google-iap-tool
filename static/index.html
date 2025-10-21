@@ -55,12 +55,24 @@
             display: grid;
             gap: 1rem;
         }
-        label {
+        label,
+        fieldset {
             display: grid;
             gap: 0.5rem;
             font-weight: 600;
         }
+        fieldset {
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 1rem;
+        }
         input, textarea {
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            font-size: 1rem;
+        }
+        select {
             padding: 0.75rem;
             border-radius: 8px;
             border: 1px solid #ccc;
@@ -94,6 +106,32 @@
             text-align: center;
             color: #666;
         }
+        .translations {
+            display: grid;
+            gap: 1rem;
+        }
+        .translations h3 {
+            margin: 0;
+        }
+        .translation-card {
+            border: 1px dashed #c5d9ff;
+            border-radius: 10px;
+            padding: 1rem;
+            display: grid;
+            gap: 0.75rem;
+            background: #f8fbff;
+        }
+        .translation-card h4 {
+            margin: 0;
+        }
+        .hint {
+            color: #555;
+            font-weight: 400;
+            margin: 0;
+        }
+        .pricing legend {
+            font-weight: 700;
+        }
         @media (max-width: 600px) {
             main {
                 padding: 1rem;
@@ -124,15 +162,69 @@
                 <label>상품 ID (SKU)
                     <input type="text" name="sku" required minlength="3" />
                 </label>
-                <label>표시 이름
-                    <input type="text" name="title" required minlength="3" />
+                <label>기본 언어
+                    <select name="default_language" required>
+                        <option value="ko-KR" selected>한국어 (ko-KR)</option>
+                        <option value="en-SG">영어 (en-SG)</option>
+                        <option value="zh-TW">중국어 번체 (zh-TW)</option>
+                    </select>
                 </label>
-                <label>설명
-                    <textarea name="description" rows="3" required></textarea>
-                </label>
-                <label>가격 (원)
-                    <input type="number" name="price_won" min="100" step="1" required />
-                </label>
+
+                <div class="translations">
+                    <h3>번역 정보</h3>
+                    <p class="hint">언어별로 이름과 설명을 입력하세요. 기본 언어 항목은 필수입니다.</p>
+                    <div class="translation-card" data-language="ko-KR">
+                        <h4>한국어 (ko-KR)</h4>
+                        <label>이름
+                            <input type="text" name="title_ko-KR" minlength="1" />
+                        </label>
+                        <label>설명
+                            <textarea name="description_ko-KR" rows="3"></textarea>
+                        </label>
+                    </div>
+                    <div class="translation-card" data-language="en-SG">
+                        <h4>영어 (en-SG)</h4>
+                        <label>이름
+                            <input type="text" name="title_en-SG" minlength="1" />
+                        </label>
+                        <label>설명
+                            <textarea name="description_en-SG" rows="3"></textarea>
+                        </label>
+                    </div>
+                    <div class="translation-card" data-language="zh-TW">
+                        <h4>중국어 번체 (zh-TW)</h4>
+                        <label>이름
+                            <input type="text" name="title_zh-TW" minlength="1" />
+                        </label>
+                        <label>설명
+                            <textarea name="description_zh-TW" rows="3"></textarea>
+                        </label>
+                    </div>
+                </div>
+
+                <fieldset class="pricing">
+                    <legend>가격 설정</legend>
+                    <label>가격 템플릿 선택
+                        <select name="pricing_template_id">
+                            <option value="">직접 입력</option>
+                            <option value="4638145486334993058">KRW 1,500 - DG</option>
+                            <option value="4638389317752415709">KRW 3,300 - DG</option>
+                            <option value="4634909338613550072">KRW 5,500 - DG</option>
+                            <option value="4636530968328709393">KRW 9,900 - DG</option>
+                            <option value="4637753759726870322">KRW 11,000 - DG</option>
+                            <option value="4637759369131609639">KRW 15,000 - DG</option>
+                            <option value="4637268599837683290">KRW 22,000 - DG</option>
+                            <option value="4634387635969426013">KRW 33,000 - DG</option>
+                            <option value="4638211831304279172">KRW 55,000 - DG</option>
+                            <option value="4637070912170903143">KRW 66,000 - DG</option>
+                            <option value="4637204457195088321">KRW 110,000 - DG</option>
+                        </select>
+                    </label>
+                    <label>직접 입력 시 가격 (원)
+                        <input type="number" name="price_won" min="100" step="1" />
+                    </label>
+                </fieldset>
+
                 <button type="submit">상품 생성</button>
                 <div id="form-status" class="status"></div>
             </form>
@@ -145,6 +237,9 @@
         const prevBtn = document.getElementById('prev-btn');
         const form = document.getElementById('create-form');
         const statusEl = document.getElementById('form-status');
+        const pricingTemplateSelect = form.querySelector('[name="pricing_template_id"]');
+        const priceWonInput = form.querySelector('[name="price_won"]');
+        const translationLanguages = ['ko-KR', 'en-SG', 'zh-TW'];
 
         const tokenStack = [];
         let currentToken = undefined;
@@ -208,11 +303,72 @@
             fetchList(currentToken);
         });
 
+        pricingTemplateSelect.addEventListener('change', () => {
+            const useTemplate = pricingTemplateSelect.value.trim() !== '';
+            priceWonInput.disabled = useTemplate;
+            if (useTemplate) {
+                priceWonInput.value = '';
+            }
+        });
+
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
             const formData = new FormData(form);
-            const payload = Object.fromEntries(formData.entries());
-            payload.price_won = Number(payload.price_won);
+            statusEl.textContent = '';
+            const sku = (formData.get('sku') || '').trim();
+            const defaultLanguage = formData.get('default_language');
+            const pricingTemplateId = (formData.get('pricing_template_id') || '').trim();
+            const priceWonRaw = (formData.get('price_won') || '').trim();
+
+            if (!sku) {
+                statusEl.textContent = '상품 ID를 입력해주세요.';
+                return;
+            }
+
+            const translations = [];
+            for (const language of translationLanguages) {
+                const title = (formData.get(`title_${language}`) || '').trim();
+                const description = (formData.get(`description_${language}`) || '').trim();
+                if (!title && !description) {
+                    continue;
+                }
+                if (!title || !description) {
+                    statusEl.textContent = `${language} 번역은 이름과 설명을 모두 입력해야 합니다.`;
+                    return;
+                }
+                translations.push({ language, title, description });
+            }
+
+            if (!translations.some((item) => item.language === defaultLanguage)) {
+                statusEl.textContent = '기본 언어와 일치하는 번역을 입력해주세요.';
+                return;
+            }
+
+            const payload = {
+                sku,
+                default_language: defaultLanguage,
+                translations,
+            };
+
+            if (pricingTemplateId) {
+                payload.pricing_template_id = pricingTemplateId;
+            } else {
+                if (!priceWonRaw) {
+                    statusEl.textContent = '가격을 입력하거나 템플릿을 선택해주세요.';
+                    return;
+                }
+                const priceWonValue = Number(priceWonRaw);
+                if (Number.isNaN(priceWonValue)) {
+                    statusEl.textContent = '유효한 가격을 입력해주세요.';
+                    return;
+                }
+                if (priceWonValue <= 0) {
+                    statusEl.textContent = '가격은 0보다 커야 합니다.';
+                    return;
+                }
+                payload.price_won = priceWonValue;
+            }
+
             statusEl.textContent = '상품을 생성 중입니다...';
             try {
                 const res = await fetch('/api/inapp/create', {
@@ -222,10 +378,16 @@
                 });
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
-                    throw new Error(err.detail || '생성에 실패했습니다.');
+                    let message = err.detail;
+                    if (Array.isArray(message)) {
+                        message = message.map((item) => item.msg || item.detail).filter(Boolean).join(', ');
+                    }
+                    throw new Error(message || '생성에 실패했습니다.');
                 }
                 statusEl.textContent = '상품이 성공적으로 생성되었습니다.';
                 form.reset();
+                pricingTemplateSelect.value = '';
+                priceWonInput.disabled = false;
                 tokenStack.length = 0;
                 currentToken = undefined;
                 fetchList();
