@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 from dotenv import load_dotenv
@@ -25,7 +26,7 @@ app.mount("/static", static_files, name="static")
 
 @app.get("/")
 async def serve_index():
-    return await static_files.get_response("index.html")
+    return FileResponse("static/index.html")
 
 
 class Translation(BaseModel):
