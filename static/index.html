@@ -543,6 +543,18 @@
             inactive: '비활성',
             draft: '초안',
         };
+        const PRIORITY_REGIONS = [
+            { code: 'US', currency: 'USD' },
+            { code: 'HK', currency: 'HKD' },
+            { code: 'SG', currency: 'SGD' },
+            { code: 'TW', currency: 'TWD' },
+        ];
+        const PRIORITY_REGION_SET = new Set(PRIORITY_REGIONS.map((entry) => entry.code));
+        const PRIORITY_REGION_LABELS = PRIORITY_REGIONS.reduce((map, entry) => {
+            map[entry.code] = `${entry.code} (${entry.currency})`;
+            return map;
+        }, {});
+        const OTHER_REGION_NOTICE = '기타 서비스되는 리전의 가격 정책도 변경되었습니다.';
         const MAX_PAGE_SIZE = 200;
 
         const tokenStack = [];
@@ -701,18 +713,87 @@
             if (!entries.length) {
                 return null;
             }
+            const highlightEntries = entries.filter(([region]) => PRIORITY_REGION_SET.has(region));
+            const hasOtherRegions = entries.some(([region]) => !PRIORITY_REGION_SET.has(region));
+            if (!highlightEntries.length && !hasOtherRegions) {
+                return null;
+            }
+
             const container = document.createElement('div');
             container.className = 'operation-details';
-            const list = document.createElement('ul');
-            entries
-                .sort(([regionA], [regionB]) => regionA.localeCompare(regionB))
-                .forEach(([region, pricePayload]) => {
-                    const item = document.createElement('li');
-                    item.textContent = `${region}: ${formatPriceDisplay(pricePayload)}`;
-                    list.appendChild(item);
-                });
-            container.appendChild(document.createTextNode('지역 가격:'));
-            container.appendChild(list);
+            const label = document.createElement('div');
+            label.textContent = '지역 가격:';
+            container.appendChild(label);
+
+            if (highlightEntries.length) {
+                const list = document.createElement('ul');
+                highlightEntries
+                    .sort(([regionA], [regionB]) => regionA.localeCompare(regionB))
+                    .forEach(([region, pricePayload]) => {
+                        const item = document.createElement('li');
+                        const labelText = PRIORITY_REGION_LABELS[region] || region;
+                        item.textContent = `${labelText}: ${formatPriceDisplay(pricePayload)}`;
+                        list.appendChild(item);
+                    });
+                container.appendChild(list);
+            }
+
+            if (hasOtherRegions) {
+                const notice = document.createElement('div');
+                notice.className = 'hint';
+                notice.textContent = `(${OTHER_REGION_NOTICE})`;
+                container.appendChild(notice);
+            }
+
+            return container;
+        }
+
+        function buildRegionalPriceChangeDetails(previousPrices, nextPrices) {
+            const prev = previousPrices || {};
+            const next = nextPrices || {};
+            const regions = new Set([...Object.keys(prev), ...Object.keys(next)]);
+            const highlightChanges = [];
+            let hasOtherChanges = false;
+
+            regions.forEach((region) => {
+                const fromText = formatPriceDisplay(prev[region]);
+                const toText = formatPriceDisplay(next[region]);
+                if (fromText === toText) {
+                    return;
+                }
+                if (PRIORITY_REGION_SET.has(region)) {
+                    highlightChanges.push({ region, fromText, toText });
+                } else {
+                    hasOtherChanges = true;
+                }
+            });
+
+            if (!highlightChanges.length && !hasOtherChanges) {
+                return null;
+            }
+
+            const container = document.createElement('div');
+
+            if (highlightChanges.length) {
+                const list = document.createElement('ul');
+                highlightChanges
+                    .sort((a, b) => a.region.localeCompare(b.region))
+                    .forEach(({ region, fromText, toText }) => {
+                        const item = document.createElement('li');
+                        const labelText = PRIORITY_REGION_LABELS[region] || region;
+                        item.textContent = `${labelText}: ${fromText} → ${toText}`;
+                        list.appendChild(item);
+                    });
+                container.appendChild(list);
+            }
+
+            if (hasOtherChanges) {
+                const notice = document.createElement('div');
+                notice.className = 'hint';
+                notice.textContent = `(${OTHER_REGION_NOTICE})`;
+                container.appendChild(notice);
+            }
+
             return container;
         }
 
@@ -1103,29 +1184,10 @@
                                 changeItem.textContent = `가격: ${fromText} → ${toText}`;
                             } else if (field === 'prices') {
                                 changeItem.textContent = '지역 가격 변경';
-                                const priceList = document.createElement('ul');
-                                const regions = new Set([
-                                    ...Object.keys(value.from || {}),
-                                    ...Object.keys(value.to || {}),
-                                ]);
-                                Array.from(regions)
-                                    .sort((a, b) => a.localeCompare(b))
-                                    .forEach((region) => {
-                                        const fromPrice = formatPriceDisplay(value.from?.[region]);
-                                        const toPrice = formatPriceDisplay(value.to?.[region]);
-                                        if (fromPrice === toPrice) {
-                                            return;
-                                        }
-                                        const regionItem = document.createElement('li');
-                                        regionItem.textContent = `${region}: ${fromPrice} → ${toPrice}`;
-                                        priceList.appendChild(regionItem);
-                                    });
-                                if (!priceList.childElementCount) {
-                                    const sameItem = document.createElement('li');
-                                    sameItem.textContent = '변경 없음';
-                                    priceList.appendChild(sameItem);
+                                const changeDetails = buildRegionalPriceChangeDetails(value.from, value.to);
+                                if (changeDetails) {
+                                    changeItem.appendChild(changeDetails);
                                 }
-                                changeItem.appendChild(priceList);
                             } else if (field === 'listings') {
                                 changeItem.textContent = '번역 변경';
                                 const listingList = document.createElement('ul');
