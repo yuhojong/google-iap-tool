@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -8,6 +10,14 @@ from dotenv import load_dotenv
 from google_play import create_managed_inapp, list_inapp_products
 
 load_dotenv()
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="iap-manager")
 
@@ -71,6 +81,7 @@ async def api_list_inapp(token: str | None = Query(default=None)):
         result = list_inapp_products(page_token=token)
         return result
     except Exception as exc:
+        logger.exception("Failed to list in-app products")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -88,6 +99,7 @@ async def api_create_inapp(payload: CreateInAppRequest):
         )
         return created
     except Exception as exc:
+        logger.exception("Failed to create managed in-app product")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
