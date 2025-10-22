@@ -14,8 +14,6 @@ from dotenv import load_dotenv
 from google_play import (
     create_managed_inapp,
     delete_inapp_product,
-    get_all_inapp_products,
-    list_inapp_products,
     update_managed_inapp,
 )
 from price_templates import (
@@ -23,6 +21,14 @@ from price_templates import (
     generate_price_templates_from_products,
     get_template_by_id,
     index_templates_by_price_micros,
+)
+from product_cache import (
+    DEFAULT_PAGE_SIZE,
+    delete_product as delete_cached_product,
+    get_cached_products,
+    get_paginated_products,
+    refresh_products_from_remote,
+    upsert_product as upsert_cached_product,
 )
 
 load_dotenv()
@@ -373,22 +379,41 @@ def _build_import_operations(
 
         status = entry["status"] or current.get("status") or "active"
 
+        current_default_price = current.get("default_price") or {}
+        current_price_micros = str(current_default_price.get("priceMicros") or "")
+        current_currency = (current_default_price.get("currency") or "KRW").upper()
+
         applied_template = False
         template_prices: Optional[Dict[str, Any]] = None
+        price_micros = current_price_micros
+        currency = current_currency or "KRW"
+
         if entry["price_won"]:
             try:
-                price_micros, _ = _normalize_price_won(entry["price_won"])
+                normalized_price_micros, _ = _normalize_price_won(entry["price_won"])
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f"{sku} 행: {exc}") from exc
+            price_micros = normalized_price_micros
             currency = "KRW"
-            template = templates_by_price_micros.get(price_micros)
+
+            same_default_price = (
+                current_price_micros
+                and normalized_price_micros == current_price_micros
+                and current_currency == "KRW"
+            )
+
+            if not same_default_price:
+                template = templates_by_price_micros.get(normalized_price_micros)
+            else:
+                template = None
+
             if template:
                 pricing_payload = template.to_pricing_payload()
                 template_prices = pricing_payload.get("prices")
                 applied_template = True
         else:
-            price_micros = current.get("default_price", {}).get("priceMicros")
-            currency = current.get("default_price", {}).get("currency") or "KRW"
+            price_micros = current_price_micros
+            currency = current_currency or "KRW"
 
         if not price_micros or not currency:
             raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 가격 정보를 확인할 수 없습니다.")
@@ -446,10 +471,18 @@ def _build_import_operations(
     return {"operations": operations, "summary": summary}
 
 @app.get("/api/inapp/list")
-async def api_list_inapp(token: str | None = Query(default=None)):
+async def api_list_inapp(
+    token: str | None = Query(default=None),
+    refresh: bool = Query(default=False),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
+):
     try:
-        result = list_inapp_products(page_token=token)
-        return result
+        if refresh:
+            refresh_products_from_remote()
+        items, next_token = get_paginated_products(token, page_size=page_size)
+        return {"items": items, "nextPageToken": next_token}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to list in-app products")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -458,7 +491,7 @@ async def api_list_inapp(token: str | None = Query(default=None)):
 @app.get("/api/inapp/export")
 async def api_export_inapp() -> StreamingResponse:
     try:
-        products = get_all_inapp_products()
+        products = refresh_products_from_remote()
         languages = _collect_languages_from_products(products)
         output = io.StringIO()
         fieldnames = ["sku", "status", "default_language", "price_won"]
@@ -500,7 +533,7 @@ async def api_export_inapp() -> StreamingResponse:
 @app.get("/api/pricing/templates")
 async def api_list_price_templates():
     try:
-        products = get_all_inapp_products()
+        products = get_cached_products()
         templates = generate_price_templates_from_products(products)
         return {"templates": [template.to_response() for template in templates]}
     except Exception as exc:
@@ -513,7 +546,7 @@ async def api_create_inapp(payload: CreateInAppRequest):
     try:
         regional_pricing = None
         if payload.price_template_id:
-            products = get_all_inapp_products()
+            products = get_cached_products()
             templates = generate_price_templates_from_products(products)
             template = get_template_by_id(templates, payload.price_template_id)
             if not template:
@@ -526,6 +559,7 @@ async def api_create_inapp(payload: CreateInAppRequest):
             regional_pricing=regional_pricing,
             translations=[t.dict() for t in payload.translations],
         )
+        upsert_cached_product(created)
         return created
     except HTTPException:
         raise
@@ -546,7 +580,7 @@ async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
             if payload.prices
             else None
         )
-        update_managed_inapp(
+        updated = update_managed_inapp(
             sku=sku,
             default_language=payload.default_language,
             status=payload.status,
@@ -554,6 +588,7 @@ async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
             listings=listings_payload,
             prices=prices_payload,
         )
+        upsert_cached_product(updated)
         return {"status": "ok"}
     except HTTPException:
         raise
@@ -568,6 +603,7 @@ async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
 async def api_delete_inapp(sku: str):
     try:
         delete_inapp_product(sku=sku)
+        delete_cached_product(sku)
         return {"status": "ok"}
     except Exception as exc:
         logger.exception("Failed to delete in-app product")
@@ -583,7 +619,7 @@ async def api_import_preview(file: UploadFile = File(...)):
     rows, csv_languages = _parse_import_csv(content)
 
     try:
-        existing_products_raw = get_all_inapp_products()
+        existing_products_raw = refresh_products_from_remote()
         existing_products = {
             item.get("sku"): _canonicalize_product(item)
             for item in existing_products_raw
@@ -624,7 +660,7 @@ async def api_import_apply(request: ImportApplyRequest):
                     {"language": language, "title": listing.title, "description": listing.description}
                     for language, listing in data.listings.items()
                 ]
-                create_managed_inapp(
+                created = create_managed_inapp(
                     sku=data.sku,
                     default_language=data.default_language,
                     translations=translations,
@@ -632,6 +668,7 @@ async def api_import_apply(request: ImportApplyRequest):
                     prices=data.prices,
                     status=data.status,
                 )
+                upsert_cached_product(created)
                 results["create"] += 1
             elif op.action == "update":
                 if not op.data:
@@ -641,7 +678,7 @@ async def api_import_apply(request: ImportApplyRequest):
                     language: listing.model_dump()
                     for language, listing in data.listings.items()
                 }
-                update_managed_inapp(
+                updated = update_managed_inapp(
                     sku=data.sku,
                     default_language=data.default_language,
                     status=data.status,
@@ -649,9 +686,11 @@ async def api_import_apply(request: ImportApplyRequest):
                     listings=listings_payload,
                     prices=data.prices,
                 )
+                upsert_cached_product(updated)
                 results["update"] += 1
             elif op.action == "delete":
                 delete_inapp_product(sku=op.sku)
+                delete_cached_product(op.sku)
                 results["delete"] += 1
             else:  # pragma: no cover - defensive
                 raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
