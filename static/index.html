@@ -153,6 +153,31 @@
             margin-top: 1rem;
             font-weight: 600;
         }
+        .initial-loading {
+            display: grid;
+            gap: 0.75rem;
+            background: #fff;
+            border-radius: 12px;
+            padding: 1rem 1.5rem;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.06);
+        }
+        .initial-loading p {
+            margin: 0;
+            font-weight: 500;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #1a73e8, #4fc3f7);
+            transition: width 0.3s ease;
+        }
         .csv-actions {
             display: flex;
             flex-wrap: wrap;
@@ -225,11 +250,30 @@
         .operation-details li {
             line-height: 1.4;
         }
+        .pagination-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        .page-size-control {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+        }
+        .page-size-control select {
+            padding: 0.5rem 0.75rem;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            font-size: 0.95rem;
+        }
         .pagination {
             display: flex;
             justify-content: flex-end;
             gap: 0.5rem;
-            margin-top: 1rem;
         }
         .empty {
             padding: 1rem;
@@ -292,6 +336,12 @@
         <h1>Google Play IAP 관리자</h1>
     </header>
     <main>
+        <div id="initial-progress" class="initial-loading" hidden>
+            <p id="initial-progress-text" class="hint">데이터를 불러오는 중...</p>
+            <div class="progress-bar">
+                <div id="initial-progress-bar" class="progress-bar-fill"></div>
+            </div>
+        </div>
         <section>
             <h2>CSV 대량 관리</h2>
             <div class="csv-actions">
@@ -324,9 +374,19 @@
                 </table>
             </div>
             <div id="empty-state" class="empty" hidden>등록된 상품이 없습니다.</div>
-            <div class="pagination">
-                <button id="prev-btn" disabled>이전</button>
-                <button id="next-btn" disabled>다음</button>
+            <div class="pagination-controls">
+                <label class="page-size-control" for="page-size-select">
+                    페이지당 표시
+                    <select id="page-size-select">
+                        <option value="20">20개</option>
+                        <option value="50" selected>50개</option>
+                        <option value="100">100개</option>
+                    </select>
+                </label>
+                <div class="pagination">
+                    <button id="prev-btn" disabled>이전</button>
+                    <button id="next-btn" disabled>다음</button>
+                </div>
             </div>
         </section>
         <dialog id="edit-dialog">
@@ -429,6 +489,7 @@
         const emptyEl = document.getElementById('empty-state');
         const nextBtn = document.getElementById('next-btn');
         const prevBtn = document.getElementById('prev-btn');
+        const pageSizeSelect = document.getElementById('page-size-select');
         const form = document.getElementById('create-form');
         const statusEl = document.getElementById('form-status');
         const submitBtn = form.querySelector('button[type="submit"]');
@@ -456,6 +517,9 @@
         const editCancelBtn = document.getElementById('edit-cancel-btn');
         const editStatusMessage = document.getElementById('edit-status-message');
         const editSubmitBtn = editForm ? editForm.querySelector('button[type="submit"]') : null;
+        const initialProgress = document.getElementById('initial-progress');
+        const initialProgressText = document.getElementById('initial-progress-text');
+        const initialProgressBar = document.getElementById('initial-progress-bar');
 
         const STATUS_OPTIONS = ['active', 'inactive', 'draft'];
         const STATUS_LABELS = {
@@ -463,15 +527,84 @@
             inactive: '비활성',
             draft: '초안',
         };
+        const MAX_PAGE_SIZE = 200;
 
         const tokenStack = [];
         let currentToken = undefined;
         let nextToken = undefined;
         let pendingOperations = [];
         let editingItem = null;
+        let initialLoadingActive = false;
+        let initialStepsCompleted = 0;
+        let initialStepsTotal = 0;
+        let pageSize = 50;
+
+        if (pageSizeSelect) {
+            const parsed = Number(pageSizeSelect.value);
+            if (Number.isFinite(parsed) && parsed > 0) {
+                const normalized = Math.min(Math.max(Math.floor(parsed), 1), MAX_PAGE_SIZE);
+                pageSize = normalized;
+                if (normalized !== parsed) {
+                    pageSizeSelect.value = String(normalized);
+                }
+            }
+        }
 
         if (importForm) {
             importForm.addEventListener('submit', (event) => event.preventDefault());
+        }
+
+        function startInitialLoading(totalSteps) {
+            initialLoadingActive = true;
+            initialStepsTotal = totalSteps;
+            initialStepsCompleted = 0;
+            if (initialProgress) {
+                initialProgress.hidden = false;
+            }
+            if (initialProgressBar) {
+                initialProgressBar.style.width = '0%';
+            }
+            if (initialProgressText) {
+                initialProgressText.textContent = '데이터를 불러오는 중...';
+            }
+        }
+
+        function setInitialProgressMessage(message) {
+            if (initialProgressText && message) {
+                initialProgressText.textContent = message;
+            }
+        }
+
+        function finishInitialStep({ success = true, message = '' } = {}) {
+            if (!initialLoadingActive) {
+                return;
+            }
+            if (!success) {
+                if (message) {
+                    setInitialProgressMessage(message);
+                }
+                if (initialProgressBar) {
+                    initialProgressBar.style.width = '100%';
+                }
+                initialLoadingActive = false;
+                return;
+            }
+            initialStepsCompleted += 1;
+            const percent = Math.min(100, Math.round((initialStepsCompleted / initialStepsTotal) * 100));
+            if (initialProgressBar) {
+                initialProgressBar.style.width = `${percent}%`;
+            }
+            if (initialStepsCompleted >= initialStepsTotal) {
+                if (initialProgressText) {
+                    initialProgressText.textContent = '불러오기 완료';
+                }
+                setTimeout(() => {
+                    if (initialProgress) {
+                        initialProgress.hidden = true;
+                    }
+                    initialLoadingActive = false;
+                }, 500);
+            }
         }
 
         function formatPriceDisplay(price) {
@@ -1077,6 +1210,33 @@
             }
         }
 
+        function handlePageSizeChange() {
+            if (!pageSizeSelect) return;
+            const parsed = Number(pageSizeSelect.value);
+            if (!Number.isFinite(parsed) || parsed <= 0) {
+                pageSizeSelect.value = String(pageSize);
+                return;
+            }
+            const normalized = Math.min(Math.max(Math.floor(parsed), 1), MAX_PAGE_SIZE);
+            if (normalized !== parsed) {
+                pageSizeSelect.value = String(normalized);
+            }
+            if (normalized === pageSize) {
+                return;
+            }
+            pageSize = normalized;
+            tokenStack.length = 0;
+            currentToken = undefined;
+            nextToken = undefined;
+            if (prevBtn) {
+                prevBtn.disabled = true;
+            }
+            if (nextBtn) {
+                nextBtn.disabled = true;
+            }
+            fetchList();
+        }
+
         if (exportBtn) {
             exportBtn.addEventListener('click', handleExportCsv);
         }
@@ -1085,6 +1245,9 @@
         }
         if (importApplyBtn) {
             importApplyBtn.addEventListener('click', handleImportApply);
+        }
+        if (pageSizeSelect) {
+            pageSizeSelect.addEventListener('change', handlePageSizeChange);
         }
 
         if (editCancelBtn) {
@@ -1131,8 +1294,14 @@
             }
         }
 
-        async function fetchTemplates() {
+        async function fetchTemplates(options = {}) {
+            const showProgress = Boolean(options.showProgress) && initialLoadingActive;
+            let success = false;
+            let errorMessage = '';
             submitBtn.disabled = true;
+            if (showProgress) {
+                setInitialProgressMessage('가격 템플릿을 불러오는 중...');
+            }
             try {
                 const res = await fetch('/api/pricing/templates');
                 if (!res.ok) {
@@ -1162,18 +1331,44 @@
                 templateSelect.disabled = false;
                 submitBtn.disabled = false;
                 renderTemplateDetails(null);
+                success = true;
             } catch (error) {
+                errorMessage = error.message;
                 templateSelect.innerHTML = '<option value="">템플릿 로딩 실패</option>';
                 templateSelect.disabled = true;
                 submitBtn.disabled = true;
                 renderTemplateDetails(null, error.message);
+            } finally {
+                if (showProgress) {
+                    finishInitialStep({ success, message: errorMessage || '가격 템플릿을 불러오지 못했습니다.' });
+                }
             }
+            return success;
         }
 
-        async function fetchList(token) {
+        async function fetchList(token, options = {}) {
+            const showProgress = Boolean(options.showProgress) && initialLoadingActive;
+            let success = false;
+            let errorMessage = '';
+            const activeToken = typeof token === 'string' && token.length ? token : undefined;
+            currentToken = activeToken;
+            nextToken = undefined;
+            if (showProgress) {
+                setInitialProgressMessage('등록된 상품을 불러오는 중...');
+            }
             try {
-                const params = token ? `?token=${encodeURIComponent(token)}` : '';
-                const res = await fetch(`/api/inapp/list${params}`);
+                const params = new URLSearchParams();
+                if (activeToken) {
+                    params.set('token', activeToken);
+                }
+                if (options.refresh) {
+                    params.set('refresh', 'true');
+                }
+                if (pageSize && Number.isFinite(pageSize) && pageSize > 0) {
+                    params.set('page_size', String(pageSize));
+                }
+                const query = params.toString();
+                const res = await fetch(`/api/inapp/list${query ? `?${query}` : ''}`);
                 if (!res.ok) {
                     throw new Error('목록을 불러오지 못했습니다.');
                 }
@@ -1182,7 +1377,9 @@
                 nextToken = data.nextPageToken || undefined;
                 nextBtn.disabled = !nextToken;
                 prevBtn.disabled = tokenStack.length === 0;
+                success = true;
             } catch (error) {
+                errorMessage = error.message;
                 if (listEl) {
                     listEl.innerHTML = '';
                 }
@@ -1195,7 +1392,12 @@
                 }
                 nextBtn.disabled = true;
                 prevBtn.disabled = tokenStack.length === 0;
+            } finally {
+                if (showProgress) {
+                    finishInitialStep({ success, message: errorMessage || '상품 목록을 불러오지 못했습니다.' });
+                }
             }
+            return success;
         }
 
         function renderList(items) {
@@ -1371,10 +1573,15 @@
             }
         });
 
+        async function initializeApp() {
+            startInitialLoading(2);
+            await fetchTemplates({ showProgress: true });
+            await fetchList(undefined, { showProgress: true });
+        }
+
         renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } });
         renderTemplateDetails(null);
-        fetchTemplates();
-        fetchList();
+        initializeApp();
     </script>
 </body>
 </html>
