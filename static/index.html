@@ -1146,7 +1146,10 @@
                     templateSelect.innerHTML = '<option value="">등록된 템플릿이 없습니다</option>';
                     templateSelect.disabled = true;
                     submitBtn.disabled = true;
-                    renderTemplateDetails(null, '등록된 가격 템플릿이 없습니다. 환경 변수를 확인해주세요.');
+                    renderTemplateDetails(
+                        null,
+                        '등록된 상품에서 KRW 가격 템플릿을 찾을 수 없습니다. 기존 상품의 가격 구성을 확인해주세요.',
+                    );
                     return;
                 }
                 templates.forEach((tpl) => {
