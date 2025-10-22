@@ -250,6 +250,13 @@
         .operation-details li {
             line-height: 1.4;
         }
+        .translation-change-details {
+            margin: 0.25rem 0 0.5rem 1rem;
+            padding-left: 1.25rem;
+        }
+        .translation-change-details li {
+            white-space: pre-wrap;
+        }
         .pagination-controls {
             display: flex;
             justify-content: space-between;
@@ -353,6 +360,12 @@
                 </form>
             </div>
             <div id="import-status" class="status"></div>
+            <div id="import-progress" class="initial-loading" hidden>
+                <p id="import-progress-text" class="hint">변경 사항을 확인 중입니다</p>
+                <div class="progress-bar">
+                    <div id="import-progress-bar" class="progress-bar-fill"></div>
+                </div>
+            </div>
             <div id="import-preview"></div>
         </section>
         <section>
@@ -506,6 +519,9 @@
         const importApplyBtn = document.getElementById('import-apply-btn');
         const importStatusEl = document.getElementById('import-status');
         const importPreviewEl = document.getElementById('import-preview');
+        const importProgress = document.getElementById('import-progress');
+        const importProgressText = document.getElementById('import-progress-text');
+        const importProgressBar = document.getElementById('import-progress-bar');
         const editDialog = document.getElementById('edit-dialog');
         const editForm = document.getElementById('edit-form');
         const editSkuInput = document.getElementById('edit-sku');
@@ -538,6 +554,9 @@
         let initialStepsCompleted = 0;
         let initialStepsTotal = 0;
         let pageSize = 50;
+        let importProgressTimer = null;
+        let importProgressValue = 10;
+        let importProgressDirection = 1;
 
         if (pageSizeSelect) {
             const parsed = Number(pageSizeSelect.value);
@@ -604,6 +623,58 @@
                     }
                     initialLoadingActive = false;
                 }, 500);
+            }
+        }
+
+        function startImportPreviewProgress(message = '변경 사항을 확인 중입니다') {
+            if (importProgressTimer) {
+                clearInterval(importProgressTimer);
+            }
+            importProgressValue = 10;
+            importProgressDirection = 1;
+            if (importProgress) {
+                importProgress.hidden = false;
+            }
+            if (importProgressText) {
+                importProgressText.textContent = message;
+            }
+            if (importProgressBar) {
+                importProgressBar.style.width = `${importProgressValue}%`;
+            }
+            importProgressTimer = window.setInterval(() => {
+                if (!importProgressBar) {
+                    return;
+                }
+                importProgressValue += importProgressDirection * 5;
+                if (importProgressValue >= 95) {
+                    importProgressValue = 95;
+                    importProgressDirection = -1;
+                } else if (importProgressValue <= 10) {
+                    importProgressValue = 10;
+                    importProgressDirection = 1;
+                }
+                importProgressBar.style.width = `${importProgressValue}%`;
+            }, 150);
+        }
+
+        function completeImportPreviewProgress({ message = '', isError = false } = {}) {
+            if (importProgressTimer) {
+                clearInterval(importProgressTimer);
+                importProgressTimer = null;
+            }
+            if (importProgressBar) {
+                importProgressBar.style.width = '100%';
+            }
+            if (importProgressText && message) {
+                importProgressText.textContent = message;
+            }
+            const delay = isError ? 1000 : 500;
+            if (importProgress) {
+                window.setTimeout(() => {
+                    if (importProgress) {
+                        importProgress.hidden = true;
+                    }
+                }, delay);
             }
         }
 
@@ -1060,9 +1131,38 @@
                                 const listingList = document.createElement('ul');
                                 Object.entries(value).forEach(([language, diff]) => {
                                     const langItem = document.createElement('li');
-                                    const fromTitle = diff.from?.title ?? '-';
-                                    const toTitle = diff.to?.title ?? '-';
-                                    langItem.textContent = `${language}: ${fromTitle} → ${toTitle}`;
+                                    const languageLabel = document.createElement('div');
+                                    languageLabel.textContent = language;
+                                    languageLabel.style.fontWeight = '600';
+                                    langItem.appendChild(languageLabel);
+
+                                    const languageDetails = document.createElement('ul');
+                                    languageDetails.className = 'translation-change-details';
+                                    const fromTitle = diff.from?.title ?? '';
+                                    const toTitle = diff.to?.title ?? '';
+                                    const titleDetail = document.createElement('li');
+                                    if (fromTitle === toTitle) {
+                                        titleDetail.textContent = '이름: 변경 없음';
+                                    } else {
+                                        const fromValue = fromTitle || '-';
+                                        const toValue = toTitle || '-';
+                                        titleDetail.textContent = `이름: ${fromValue} → ${toValue}`;
+                                    }
+                                    languageDetails.appendChild(titleDetail);
+
+                                    const fromDescription = diff.from?.description ?? '';
+                                    const toDescription = diff.to?.description ?? '';
+                                    const descriptionDetail = document.createElement('li');
+                                    if (fromDescription === toDescription) {
+                                        descriptionDetail.textContent = '설명: 변경 없음';
+                                    } else {
+                                        const fromValue = fromDescription || '-';
+                                        const toValue = toDescription || '-';
+                                        descriptionDetail.textContent = `설명: ${fromValue} → ${toValue}`;
+                                    }
+                                    languageDetails.appendChild(descriptionDetail);
+
+                                    langItem.appendChild(languageDetails);
                                     listingList.appendChild(langItem);
                                 });
                                 changeItem.appendChild(listingList);
@@ -1132,11 +1232,16 @@
                 importStatusEl.textContent = 'CSV 파일을 선택해주세요.';
                 return;
             }
-            importStatusEl.textContent = 'CSV를 분석하는 중입니다...';
+            importStatusEl.textContent = '변경 사항을 확인 중입니다';
             importPreviewBtn.disabled = true;
             importApplyBtn.disabled = true;
+            if (importPreviewEl) {
+                importPreviewEl.innerHTML = '';
+            }
+            startImportPreviewProgress();
             const formData = new FormData();
             formData.append('file', importFileInput.files[0]);
+            let previewSucceeded = false;
             try {
                 const res = await fetch('/api/inapp/import/preview', {
                     method: 'POST',
@@ -1151,6 +1256,7 @@
                 }
                 const data = await res.json();
                 pendingOperations = data.operations || [];
+                previewSucceeded = true;
                 renderImportPreview(data);
                 if (pendingOperations.length) {
                     importStatusEl.textContent = '변경 사항을 확인한 뒤 적용 버튼을 눌러주세요.';
@@ -1164,6 +1270,12 @@
                 importStatusEl.textContent = error.message;
             } finally {
                 importPreviewBtn.disabled = false;
+                completeImportPreviewProgress({
+                    message: previewSucceeded
+                        ? '변경 사항 확인 완료'
+                        : '변경 사항을 확인하는 중 오류가 발생했습니다.',
+                    isError: !previewSucceeded,
+                });
             }
         }
 

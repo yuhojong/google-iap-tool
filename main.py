@@ -162,9 +162,9 @@ def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
     for language, listing in listings.items():
         if not isinstance(language, str) or not isinstance(listing, dict):
             continue
-        title = listing.get("title")
-        description = listing.get("description")
-        if title is None and description is None:
+        title = (listing.get("title") or "").strip()
+        description = (listing.get("description") or "").strip()
+        if not title and not description:
             continue
         normalized_listings[language] = {
             "title": title or "",
