@@ -95,6 +95,78 @@
             margin-top: 1rem;
             font-weight: 600;
         }
+        .csv-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 1rem;
+        }
+        .csv-actions form {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .csv-actions input[type="file"] {
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 0.5rem;
+            background: #fff;
+        }
+        #import-preview {
+            margin-top: 1rem;
+            display: grid;
+            gap: 1rem;
+        }
+        .preview-group {
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 1rem;
+            background: #fafafa;
+        }
+        .preview-group h3 {
+            margin: 0 0 0.5rem;
+        }
+        .operation-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: grid;
+            gap: 0.5rem;
+        }
+        .operation-create,
+        .operation-update,
+        .operation-delete {
+            border-radius: 8px;
+            padding: 0.75rem;
+        }
+        .operation-create {
+            border-left: 4px solid #0f9d58;
+            background: #f0fff4;
+        }
+        .operation-update {
+            border-left: 4px solid #fbbc04;
+            background: #fff8e1;
+        }
+        .operation-delete {
+            border-left: 4px solid #d93025;
+            background: #ffebee;
+        }
+        .operation-header {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+        .operation-details {
+            margin: 0.25rem 0 0;
+            padding-left: 1rem;
+        }
+        .operation-details ul {
+            margin: 0.25rem 0 0;
+            padding-left: 1.25rem;
+        }
+        .operation-details li {
+            line-height: 1.4;
+        }
         .pagination {
             display: flex;
             justify-content: flex-end;
@@ -162,6 +234,19 @@
         <h1>Google Play IAP 관리자</h1>
     </header>
     <main>
+        <section>
+            <h2>CSV 대량 관리</h2>
+            <div class="csv-actions">
+                <button id="export-btn" type="button">CSV 내보내기</button>
+                <form id="import-form">
+                    <input type="file" id="import-file" name="file" accept=".csv" />
+                    <button type="button" id="import-preview-btn">미리보기</button>
+                    <button type="button" id="import-apply-btn" disabled>적용</button>
+                </form>
+            </div>
+            <div id="import-status" class="status"></div>
+            <div id="import-preview"></div>
+        </section>
         <section>
             <h2>등록된 상품</h2>
             <div id="iap-list" class="iap-list"></div>
@@ -249,10 +334,328 @@
         const templateDetails = document.getElementById('template-details');
         const templateRegionList = document.getElementById('template-region-list');
         const templateMap = new Map();
+        const exportBtn = document.getElementById('export-btn');
+        const importForm = document.getElementById('import-form');
+        const importFileInput = document.getElementById('import-file');
+        const importPreviewBtn = document.getElementById('import-preview-btn');
+        const importApplyBtn = document.getElementById('import-apply-btn');
+        const importStatusEl = document.getElementById('import-status');
+        const importPreviewEl = document.getElementById('import-preview');
 
         const tokenStack = [];
         let currentToken = undefined;
         let nextToken = undefined;
+        let pendingOperations = [];
+
+        if (importForm) {
+            importForm.addEventListener('submit', (event) => event.preventDefault());
+        }
+
+        function formatPriceDisplay(price) {
+            if (!price || !price.priceMicros) {
+                return '-';
+            }
+            const microsNumber = Number(price.priceMicros);
+            if (Number.isNaN(microsNumber)) {
+                const currency = price.currency ? ` ${price.currency}` : '';
+                return `${price.priceMicros}${currency}`.trim();
+            }
+            const amount = microsNumber / 1_000_000;
+            const formatted = amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
+            const currency = price.currency ? ` ${price.currency}` : '';
+            return `${formatted}${currency}`.trim();
+        }
+
+        function buildRegionalPriceList(prices) {
+            if (!prices) {
+                return null;
+            }
+            const entries = Object.entries(prices);
+            if (!entries.length) {
+                return null;
+            }
+            const container = document.createElement('div');
+            container.className = 'operation-details';
+            const list = document.createElement('ul');
+            entries
+                .sort(([regionA], [regionB]) => regionA.localeCompare(regionB))
+                .forEach(([region, pricePayload]) => {
+                    const item = document.createElement('li');
+                    item.textContent = `${region}: ${formatPriceDisplay(pricePayload)}`;
+                    list.appendChild(item);
+                });
+            container.appendChild(document.createTextNode('지역 가격:'));
+            container.appendChild(list);
+            return container;
+        }
+
+        function renderImportPreview(data) {
+            importPreviewEl.innerHTML = '';
+            const operations = data?.operations || [];
+            const summary = data?.summary || {};
+
+            if (!operations.length) {
+                const message = document.createElement('p');
+                message.className = 'hint';
+                message.textContent = '변경 사항이 없습니다.';
+                importPreviewEl.appendChild(message);
+                return;
+            }
+
+            const summaryText = document.createElement('p');
+            summaryText.className = 'operation-header';
+            summaryText.textContent = `생성 ${summary.create || 0}건 · 업데이트 ${summary.update || 0}건 · 삭제 ${summary.delete || 0}건`;
+            importPreviewEl.appendChild(summaryText);
+
+            const groups = { create: [], update: [], delete: [] };
+            operations.forEach((op) => {
+                if (groups[op.action]) {
+                    groups[op.action].push(op);
+                }
+            });
+
+            const actionLabels = {
+                create: '생성 예정',
+                update: '업데이트 예정',
+                delete: '삭제 예정',
+            };
+
+            Object.entries(groups).forEach(([action, ops]) => {
+                if (!ops.length) return;
+                const groupSection = document.createElement('div');
+                groupSection.className = 'preview-group';
+                const heading = document.createElement('h3');
+                heading.textContent = `${actionLabels[action]} (${ops.length})`;
+                groupSection.appendChild(heading);
+                const list = document.createElement('ul');
+                list.className = 'operation-list';
+
+                ops.forEach((op) => {
+                    const item = document.createElement('li');
+                    item.className = `operation-${action}`;
+                    const header = document.createElement('div');
+                    header.className = 'operation-header';
+                    const strong = document.createElement('strong');
+                    strong.textContent = op.sku;
+                    header.appendChild(strong);
+
+                    if (action === 'create' && op.data) {
+                        const listing = op.data.listings?.[op.data.default_language];
+                        const title = listing?.title ? ` - ${listing.title}` : '';
+                        const priceText = formatPriceDisplay(op.data.default_price);
+                        header.appendChild(document.createTextNode(`${title} (${op.data.status || '-'})`));
+                        const priceInfo = document.createElement('div');
+                        priceInfo.className = 'operation-details';
+                        priceInfo.textContent = `가격: ${priceText}`;
+                        item.appendChild(header);
+                        item.appendChild(priceInfo);
+                        const regionalPrices = buildRegionalPriceList(op.data.prices);
+                        if (regionalPrices) {
+                            item.appendChild(regionalPrices);
+                        }
+                    } else if (action === 'update' && op.changes) {
+                        const changeEntries = Object.entries(op.changes);
+                        header.appendChild(document.createTextNode(` - ${changeEntries.length}개 변경`));
+                        item.appendChild(header);
+                        const details = document.createElement('div');
+                        details.className = 'operation-details';
+                        const detailList = document.createElement('ul');
+
+                        changeEntries.forEach(([field, value]) => {
+                            const changeItem = document.createElement('li');
+                            if (field === 'default_price') {
+                                const fromText = formatPriceDisplay(value.from);
+                                const toText = formatPriceDisplay(value.to);
+                                changeItem.textContent = `가격: ${fromText} → ${toText}`;
+                            } else if (field === 'prices') {
+                                changeItem.textContent = '지역 가격 변경';
+                                const priceList = document.createElement('ul');
+                                const regions = new Set([
+                                    ...Object.keys(value.from || {}),
+                                    ...Object.keys(value.to || {}),
+                                ]);
+                                Array.from(regions)
+                                    .sort((a, b) => a.localeCompare(b))
+                                    .forEach((region) => {
+                                        const fromPrice = formatPriceDisplay(value.from?.[region]);
+                                        const toPrice = formatPriceDisplay(value.to?.[region]);
+                                        if (fromPrice === toPrice) {
+                                            return;
+                                        }
+                                        const regionItem = document.createElement('li');
+                                        regionItem.textContent = `${region}: ${fromPrice} → ${toPrice}`;
+                                        priceList.appendChild(regionItem);
+                                    });
+                                if (!priceList.childElementCount) {
+                                    const sameItem = document.createElement('li');
+                                    sameItem.textContent = '변경 없음';
+                                    priceList.appendChild(sameItem);
+                                }
+                                changeItem.appendChild(priceList);
+                            } else if (field === 'listings') {
+                                changeItem.textContent = '번역 변경';
+                                const listingList = document.createElement('ul');
+                                Object.entries(value).forEach(([language, diff]) => {
+                                    const langItem = document.createElement('li');
+                                    const fromTitle = diff.from?.title ?? '-';
+                                    const toTitle = diff.to?.title ?? '-';
+                                    langItem.textContent = `${language}: ${fromTitle} → ${toTitle}`;
+                                    listingList.appendChild(langItem);
+                                });
+                                changeItem.appendChild(listingList);
+                            } else {
+                                const fromValue = value.from ?? '-';
+                                const toValue = value.to ?? '-';
+                                changeItem.textContent = `${field}: ${fromValue} → ${toValue}`;
+                            }
+                            detailList.appendChild(changeItem);
+                        });
+                        details.appendChild(detailList);
+                        item.appendChild(details);
+                    } else if (action === 'delete' && op.current) {
+                        const listing = op.current.listings?.[op.current.default_language];
+                        const title = listing?.title ? ` - ${listing.title}` : '';
+                        const priceText = formatPriceDisplay(op.current.default_price);
+                        header.appendChild(document.createTextNode(title));
+                        item.appendChild(header);
+                        const info = document.createElement('div');
+                        info.className = 'operation-details';
+                        info.textContent = `가격: ${priceText}`;
+                        item.appendChild(info);
+                        const regionalPrices = buildRegionalPriceList(op.current.prices);
+                        if (regionalPrices) {
+                            item.appendChild(regionalPrices);
+                        }
+                    } else {
+                        item.appendChild(header);
+                    }
+
+                    list.appendChild(item);
+                });
+
+                groupSection.appendChild(list);
+                importPreviewEl.appendChild(groupSection);
+            });
+        }
+
+        async function handleExportCsv() {
+            importStatusEl.textContent = '';
+            exportBtn.disabled = true;
+            try {
+                const res = await fetch('/api/inapp/export');
+                if (!res.ok) {
+                    throw new Error('CSV 내보내기에 실패했습니다.');
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                const timestamp = new Date().toISOString().replace(/[:T]/g, '').slice(0, 14);
+                anchor.download = `iap-products-${timestamp}.csv`;
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                URL.revokeObjectURL(url);
+                importStatusEl.textContent = 'CSV 파일을 다운로드했습니다.';
+            } catch (error) {
+                importStatusEl.textContent = error.message;
+            } finally {
+                exportBtn.disabled = false;
+            }
+        }
+
+        async function handleImportPreview() {
+            if (!importFileInput.files?.length) {
+                importStatusEl.textContent = 'CSV 파일을 선택해주세요.';
+                return;
+            }
+            importStatusEl.textContent = 'CSV를 분석하는 중입니다...';
+            importPreviewBtn.disabled = true;
+            importApplyBtn.disabled = true;
+            const formData = new FormData();
+            formData.append('file', importFileInput.files[0]);
+            try {
+                const res = await fetch('/api/inapp/import/preview', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '미리보기에 실패했습니다.');
+                }
+                const data = await res.json();
+                pendingOperations = data.operations || [];
+                renderImportPreview(data);
+                if (pendingOperations.length) {
+                    importStatusEl.textContent = '변경 사항을 확인한 뒤 적용 버튼을 눌러주세요.';
+                    importApplyBtn.disabled = false;
+                } else {
+                    importStatusEl.textContent = '적용할 변경 사항이 없습니다.';
+                }
+            } catch (error) {
+                importPreviewEl.innerHTML = '';
+                pendingOperations = [];
+                importStatusEl.textContent = error.message;
+            } finally {
+                importPreviewBtn.disabled = false;
+            }
+        }
+
+        async function handleImportApply() {
+            if (!pendingOperations.length) {
+                importStatusEl.textContent = '적용할 변경 사항이 없습니다.';
+                return;
+            }
+            importStatusEl.textContent = '변경 사항을 적용하는 중입니다...';
+            importApplyBtn.disabled = true;
+            importPreviewBtn.disabled = true;
+            try {
+                const operationsPayload = pendingOperations.map((op) => {
+                    const base = { action: op.action, sku: op.sku };
+                    if (op.data) {
+                        base.data = JSON.parse(JSON.stringify(op.data));
+                    }
+                    return base;
+                });
+                const res = await fetch('/api/inapp/import/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ operations: operationsPayload }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '변경 사항 적용에 실패했습니다.');
+                }
+                importStatusEl.textContent = '변경 사항이 적용되었습니다.';
+                pendingOperations = [];
+                renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } });
+                importFileInput.value = '';
+                fetchList();
+            } catch (error) {
+                importStatusEl.textContent = error.message;
+                if (pendingOperations.length) {
+                    importApplyBtn.disabled = false;
+                }
+            } finally {
+                importPreviewBtn.disabled = false;
+            }
+        }
+
+        if (exportBtn) {
+            exportBtn.addEventListener('click', handleExportCsv);
+        }
+        if (importPreviewBtn) {
+            importPreviewBtn.addEventListener('click', handleImportPreview);
+        }
+        if (importApplyBtn) {
+            importApplyBtn.addEventListener('click', handleImportApply);
+        }
 
         function renderTemplateDetails(template, message) {
             if (message) {
@@ -467,6 +870,7 @@
             }
         });
 
+        renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } });
         renderTemplateDetails(null);
         fetchTemplates();
         fetchList();

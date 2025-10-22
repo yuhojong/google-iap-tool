@@ -1,13 +1,22 @@
+import csv
+import io
 import logging
+from typing import Any, Dict, Iterable, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from dotenv import load_dotenv
 
-from google_play import create_managed_inapp, list_inapp_products
+from google_play import (
+    create_managed_inapp,
+    delete_inapp_product,
+    get_all_inapp_products,
+    list_inapp_products,
+    update_managed_inapp,
+)
 from price_templates import get_price_template, get_price_templates
 
 load_dotenv()
@@ -67,6 +76,354 @@ class CreateInAppRequest(BaseModel):
             raise ValueError("가격 템플릿 또는 직접 입력 가격 중 하나만 선택해야 합니다.")
         return model
 
+
+class ListingPayload(BaseModel):
+    title: str
+    description: str
+
+
+class PricePayload(BaseModel):
+    priceMicros: str
+    currency: str
+
+
+class ImportProductPayload(BaseModel):
+    sku: str
+    status: str = Field(default="active")
+    default_language: str
+    default_price: PricePayload
+    listings: Dict[str, ListingPayload]
+    prices: Optional[Dict[str, Any]] = None
+
+    @field_validator("listings")
+    @classmethod
+    def ensure_default_language_listing(
+        cls, listings: Dict[str, ListingPayload], info: Dict[str, Any]
+    ) -> Dict[str, ListingPayload]:
+        default_language = info.data.get("default_language")
+        if default_language and default_language not in listings:
+            raise ValueError("기본 언어 번역 정보가 필요합니다.")
+        return listings
+
+
+class ImportOperation(BaseModel):
+    action: Literal["create", "update", "delete"]
+    sku: str
+    data: Optional[ImportProductPayload] = None
+
+
+class ImportApplyRequest(BaseModel):
+    operations: List[ImportOperation]
+
+
+def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List[str]:
+    languages: set[str] = set()
+    for item in products:
+        listings = item.get("listings") or {}
+        for language in listings.keys():
+            if isinstance(language, str):
+                languages.add(language)
+    return sorted(languages)
+
+
+def _collect_price_regions_from_products(products: Iterable[Dict[str, Any]]) -> List[str]:
+    regions: set[str] = set()
+    for item in products:
+        prices = item.get("prices") or {}
+        for region in prices.keys():
+            if isinstance(region, str):
+                regions.add(region)
+    return sorted(regions)
+
+
+def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
+    listings = item.get("listings") or {}
+    normalized_listings: Dict[str, Dict[str, str]] = {}
+    for language, listing in listings.items():
+        if not isinstance(language, str) or not isinstance(listing, dict):
+            continue
+        title = listing.get("title")
+        description = listing.get("description")
+        if title is None and description is None:
+            continue
+        normalized_listings[language] = {
+            "title": title or "",
+            "description": description or "",
+        }
+
+    default_price = item.get("defaultPrice") or {}
+    prices = item.get("prices") or {}
+    normalized_prices: Dict[str, Dict[str, str]] = {}
+    for region, price in prices.items():
+        if not isinstance(region, str) or not isinstance(price, dict):
+            continue
+        price_micros = price.get("priceMicros")
+        currency = price.get("currency")
+        if price_micros is None and currency is None:
+            continue
+        normalized_prices[region] = {
+            "priceMicros": str(price_micros or ""),
+            "currency": currency or "",
+        }
+
+    return {
+        "sku": item.get("sku", ""),
+        "status": item.get("status", ""),
+        "default_language": item.get("defaultLanguage", ""),
+        "default_price": {
+            "priceMicros": str(default_price.get("priceMicros") or ""),
+            "currency": default_price.get("currency") or "",
+        },
+        "listings": normalized_listings,
+        "prices": normalized_prices or None,
+    }
+
+
+def _normalize_price_micros(value: str) -> str:
+    stripped = value.strip().replace(",", "").replace("_", "")
+    if not stripped:
+        raise ValueError("가격 정보가 필요합니다.")
+    try:
+        price = int(stripped)
+    except ValueError as exc:  # pragma: no cover - defensive
+        raise ValueError("price_micros 값은 정수여야 합니다.") from exc
+    if price < 0:
+        raise ValueError("가격은 음수가 될 수 없습니다.")
+    return str(price)
+
+
+def _compute_changes(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    changes: Dict[str, Any] = {}
+    if before.get("status") != after.get("status"):
+        changes["status"] = {"from": before.get("status"), "to": after.get("status")}
+    if before.get("default_language") != after.get("default_language"):
+        changes["default_language"] = {
+            "from": before.get("default_language"),
+            "to": after.get("default_language"),
+        }
+
+    before_price = before.get("default_price") or {}
+    after_price = after.get("default_price") or {}
+    if (
+        before_price.get("priceMicros") != after_price.get("priceMicros")
+        or before_price.get("currency") != after_price.get("currency")
+    ):
+        changes["default_price"] = {
+            "from": before_price,
+            "to": after_price,
+        }
+
+    listing_changes: Dict[str, Any] = {}
+    before_listings = before.get("listings") or {}
+    after_listings = after.get("listings") or {}
+    languages = set(before_listings.keys()) | set(after_listings.keys())
+    for language in sorted(languages):
+        prev = before_listings.get(language)
+        nxt = after_listings.get(language)
+        if prev != nxt:
+            listing_changes[language] = {"from": prev, "to": nxt}
+    if listing_changes:
+        changes["listings"] = listing_changes
+
+    before_prices = before.get("prices") or {}
+    after_prices = after.get("prices") or {}
+    if before_prices != after_prices:
+        changes["prices"] = {"from": before_prices, "to": after_prices}
+    return changes
+
+
+def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV 파일은 UTF-8 인코딩이어야 합니다.") from exc
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
+
+    languages = sorted({name.split("title_", 1)[1] for name in reader.fieldnames if name.startswith("title_")})
+    price_regions = {
+        name.split("price_micros_", 1)[1]
+        for name in reader.fieldnames
+        if name.startswith("price_micros_")
+    }
+    price_regions.update(
+        name.split("currency_", 1)[1]
+        for name in reader.fieldnames
+        if name.startswith("currency_")
+    )
+    sorted_regions = sorted(region for region in price_regions if region)
+    rows: List[Dict[str, Any]] = []
+    seen_skus: set[str] = set()
+
+    for index, row in enumerate(reader, start=2):
+        sku = (row.get("sku") or "").strip()
+        if not sku:
+            continue
+        if sku in seen_skus:
+            raise HTTPException(status_code=400, detail=f"CSV에 중복된 SKU가 있습니다: {sku}")
+        seen_skus.add(sku)
+
+        entry: Dict[str, Any] = {
+            "row": index,
+            "sku": sku,
+            "status": (row.get("status") or "").strip() or None,
+            "default_language": (row.get("default_language") or "").strip() or None,
+            "price_micros": (row.get("price_micros") or "").strip() or None,
+            "currency": (row.get("currency") or "").strip() or None,
+            "listings": {},
+            "prices": {},
+        }
+        for language in languages:
+            title_key = f"title_{language}"
+            description_key = f"description_{language}"
+            title = (row.get(title_key) or "").strip()
+            description = (row.get(description_key) or "").strip()
+            if title or description:
+                entry["listings"][language] = {
+                    "title": title,
+                    "description": description,
+                }
+
+        for region in sorted_regions:
+            price_key = f"price_micros_{region}"
+            currency_key = f"currency_{region}"
+            raw_price = (row.get(price_key) or "").strip()
+            raw_currency = (row.get(currency_key) or "").strip()
+            if not raw_price and not raw_currency:
+                continue
+            if not raw_price:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{sku} 행: {region} 가격의 price_micros 값을 입력해주세요.",
+                )
+            if not raw_currency:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{sku} 행: {region} 가격의 currency 값을 입력해주세요.",
+                )
+            try:
+                normalized_price = _normalize_price_micros(raw_price)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: {region} 가격 - {exc}") from exc
+            entry["prices"][region] = {"priceMicros": normalized_price, "currency": raw_currency}
+
+        if not entry["prices"]:
+            entry["prices"] = None
+
+        rows.append(entry)
+
+    return rows, languages
+
+
+def _build_import_operations(
+    rows: List[Dict[str, Any]],
+    existing_products: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    operations: List[Dict[str, Any]] = []
+    summary = {"create": 0, "update": 0, "delete": 0}
+
+    remaining_products = {sku: data for sku, data in existing_products.items()}
+
+    for entry in rows:
+        sku = entry["sku"]
+        current = remaining_products.pop(sku, None)
+
+        if current is None:
+            default_language = entry["default_language"] or ""
+            if not default_language:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: default_language 값을 입력해주세요.")
+
+            price_micros_value = entry["price_micros"]
+            if not price_micros_value:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: price_micros 값을 입력해주세요.")
+            try:
+                price_micros = _normalize_price_micros(price_micros_value)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: {exc}") from exc
+
+            currency = entry["currency"] or "KRW"
+            listings = entry["listings"]
+            default_listing = listings.get(default_language)
+            if not default_listing or not default_listing.get("title") or not default_listing.get("description"):
+                raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 번역 제목과 설명이 필요합니다.")
+
+            new_product = {
+                "sku": sku,
+                "status": entry["status"] or "active",
+                "default_language": default_language,
+                "default_price": {"priceMicros": price_micros, "currency": currency},
+                "listings": listings,
+                "prices": entry.get("prices") or None,
+            }
+            operations.append({"action": "create", "sku": sku, "data": new_product})
+            summary["create"] += 1
+            continue
+
+        default_language = entry["default_language"] or current.get("default_language") or ""
+        if not default_language:
+            raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 정보를 확인할 수 없습니다.")
+
+        status = entry["status"] or current.get("status") or "active"
+
+        if entry["price_micros"]:
+            try:
+                price_micros = _normalize_price_micros(entry["price_micros"])
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: {exc}") from exc
+            currency = entry["currency"] or current.get("default_price", {}).get("currency") or "KRW"
+        else:
+            price_micros = current.get("default_price", {}).get("priceMicros")
+            currency = entry["currency"] or current.get("default_price", {}).get("currency") or ""
+
+        if not price_micros or not currency:
+            raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 가격 정보를 확인할 수 없습니다.")
+
+        new_listings = {lang: data.copy() for lang, data in (current.get("listings") or {}).items()}
+        for language, listing in entry["listings"].items():
+            if listing.get("title") and listing.get("description"):
+                new_listings[language] = listing
+
+        if default_language not in new_listings:
+            raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 번역 정보를 제공해야 합니다.")
+
+        new_prices = {
+            region: data.copy()
+            for region, data in (current.get("prices") or {}).items()
+            if isinstance(data, dict)
+        }
+        for region, price_payload in (entry.get("prices") or {}).items():
+            new_prices[region] = price_payload.copy()
+
+        new_product = {
+            "sku": sku,
+            "status": status,
+            "default_language": default_language,
+            "default_price": {"priceMicros": price_micros, "currency": currency},
+            "listings": new_listings,
+            "prices": new_prices or None,
+        }
+
+        changes = _compute_changes(current, new_product)
+        if changes:
+            operations.append(
+                {
+                    "action": "update",
+                    "sku": sku,
+                    "data": new_product,
+                    "current": current,
+                    "changes": changes,
+                }
+            )
+            summary["update"] += 1
+
+    for remaining in remaining_products.values():
+        operations.append({"action": "delete", "sku": remaining.get("sku"), "current": remaining})
+        summary["delete"] += 1
+
+    return {"operations": operations, "summary": summary}
+
 @app.get("/api/inapp/list")
 async def api_list_inapp(token: str | None = Query(default=None)):
     try:
@@ -75,6 +432,54 @@ async def api_list_inapp(token: str | None = Query(default=None)):
     except Exception as exc:
         logger.exception("Failed to list in-app products")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/inapp/export")
+async def api_export_inapp() -> StreamingResponse:
+    try:
+        products = get_all_inapp_products()
+        languages = _collect_languages_from_products(products)
+        price_regions = _collect_price_regions_from_products(products)
+        output = io.StringIO()
+        fieldnames = ["sku", "status", "default_language", "price_micros", "currency"]
+        for region in price_regions:
+            fieldnames.append(f"price_micros_{region}")
+            fieldnames.append(f"currency_{region}")
+        for language in languages:
+            fieldnames.append(f"title_{language}")
+            fieldnames.append(f"description_{language}")
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in products:
+            canonical = _canonicalize_product(item)
+            row = {
+                "sku": canonical.get("sku", ""),
+                "status": canonical.get("status", ""),
+                "default_language": canonical.get("default_language", ""),
+                "price_micros": canonical.get("default_price", {}).get("priceMicros", ""),
+                "currency": canonical.get("default_price", {}).get("currency", ""),
+            }
+            prices = canonical.get("prices") or {}
+            for region in price_regions:
+                price_payload = prices.get(region) or {}
+                row[f"price_micros_{region}"] = price_payload.get("priceMicros", "")
+                row[f"currency_{region}"] = price_payload.get("currency", "")
+            listings = canonical.get("listings") or {}
+            for language in languages:
+                listing = listings.get(language) or {}
+                row[f"title_{language}"] = listing.get("title", "")
+                row[f"description_{language}"] = listing.get("description", "")
+            writer.writerow(row)
+        csv_content = output.getvalue()
+        csv_bytes = csv_content.encode("utf-8-sig")
+        headers = {"Content-Disposition": 'attachment; filename="iap-products.csv"'}
+        return StreamingResponse(iter([csv_bytes]), media_type="text/csv", headers=headers)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to export in-app products")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 @app.get("/api/pricing/templates")
 async def api_list_price_templates():
@@ -108,6 +513,96 @@ async def api_create_inapp(payload: CreateInAppRequest):
     except Exception as exc:
         logger.exception("Failed to create managed in-app product")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/inapp/import/preview")
+async def api_import_preview(file: UploadFile = File(...)):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
+
+    rows, csv_languages = _parse_import_csv(content)
+
+    try:
+        existing_products_raw = get_all_inapp_products()
+        existing_products = {
+            item.get("sku"): _canonicalize_product(item)
+            for item in existing_products_raw
+            if item.get("sku")
+        }
+    except Exception as exc:
+        logger.exception("Failed to load existing in-app products for import preview")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    operations_payload = _build_import_operations(rows, existing_products)
+    existing_languages = {
+        lang
+        for product in existing_products.values()
+        for lang in (product.get("listings") or {}).keys()
+    }
+    languages = sorted(set(csv_languages) | existing_languages)
+
+    return {
+        "languages": languages,
+        "operations": operations_payload["operations"],
+        "summary": operations_payload["summary"],
+    }
+
+
+@app.post("/api/inapp/import/apply")
+async def api_import_apply(request: ImportApplyRequest):
+    results = {"create": 0, "update": 0, "delete": 0}
+
+    try:
+        for op in request.operations:
+            if op.action == "create":
+                if not op.data:
+                    raise HTTPException(status_code=400, detail="create 작업에는 data가 필요합니다.")
+                data = op.data
+                translations = [
+                    {"language": language, "title": listing.title, "description": listing.description}
+                    for language, listing in data.listings.items()
+                ]
+                create_managed_inapp(
+                    sku=data.sku,
+                    default_language=data.default_language,
+                    translations=translations,
+                    default_price=data.default_price.model_dump(),
+                    prices=data.prices,
+                    status=data.status,
+                )
+                results["create"] += 1
+            elif op.action == "update":
+                if not op.data:
+                    raise HTTPException(status_code=400, detail="update 작업에는 data가 필요합니다.")
+                data = op.data
+                listings_payload = {
+                    language: listing.model_dump()
+                    for language, listing in data.listings.items()
+                }
+                update_managed_inapp(
+                    sku=data.sku,
+                    default_language=data.default_language,
+                    status=data.status,
+                    default_price=data.default_price.model_dump(),
+                    listings=listings_payload,
+                    prices=data.prices,
+                )
+                results["update"] += 1
+            elif op.action == "delete":
+                delete_inapp_product(sku=op.sku)
+                results["delete"] += 1
+            else:  # pragma: no cover - defensive
+                raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("Failed to apply import operations")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"status": "ok", "summary": results}
 
 
 @app.get("/health")
