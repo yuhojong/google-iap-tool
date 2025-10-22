@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -52,6 +52,23 @@ def list_inapp_products(page_token: Optional[str] = None) -> Dict[str, Any]:
         raise RuntimeError(f"Google API 오류: {exc}") from exc
 
 
+def iterate_all_inapp_products() -> Iterable[Dict[str, Any]]:
+    """Yield all in-app products by traversing every page."""
+
+    next_token: Optional[str] = None
+    while True:
+        result = list_inapp_products(page_token=next_token)
+        for item in result.get("items", []):
+            yield item
+        next_token = result.get("nextPageToken")
+        if not next_token:
+            break
+
+
+def get_all_inapp_products() -> List[Dict[str, Any]]:
+    return list(iterate_all_inapp_products())
+
+
 def create_managed_inapp(
     *,
     sku: str,
@@ -59,30 +76,38 @@ def create_managed_inapp(
     price_won: Optional[int] = None,
     regional_pricing: Optional[Dict[str, Any]] = None,
     translations: Optional[list[dict[str, str]]] = None,
+    default_price: Optional[Dict[str, Any]] = None,
+    prices: Optional[Dict[str, Any]] = None,
+    status: str = "active",
 ) -> Dict[str, Any]:
-    if regional_pricing is None and price_won is None:
-        raise ValueError("가격 정보가 필요합니다.")
-    if regional_pricing is not None and price_won is not None:
-        raise ValueError("직접 입력 가격과 템플릿 가격을 동시에 지정할 수 없습니다.")
+    resolved_default_price: Optional[Dict[str, Any]] = None
+    resolved_prices: Optional[Dict[str, Any]] = None
 
-    default_price: Dict[str, Any]
-    region_prices: Optional[Dict[str, Any]] = None
-
-    if regional_pricing is not None:
-        default_price = regional_pricing.get("defaultPrice")
-        if not isinstance(default_price, dict):
+    if default_price is not None:
+        if regional_pricing is not None or price_won is not None:
+            raise ValueError("직접 지정한 가격과 다른 가격 옵션을 동시에 사용할 수 없습니다.")
+        resolved_default_price = default_price
+        resolved_prices = prices
+    elif regional_pricing is not None:
+        resolved_default_price = regional_pricing.get("defaultPrice")
+        if not isinstance(resolved_default_price, dict):
             raise ValueError("가격 템플릿에 기본 가격 정보가 없습니다.")
-        region_prices = regional_pricing.get("prices")
-        if region_prices is not None and not isinstance(region_prices, dict):
+        resolved_prices = regional_pricing.get("prices")
+        if resolved_prices is not None and not isinstance(resolved_prices, dict):
             raise ValueError("가격 템플릿의 지역 가격 정보가 잘못되었습니다.")
     else:
         if price_won is None or price_won <= 0:
             raise ValueError("가격은 양수여야 합니다.")
         price_micros = price_won * 1_000_000
-        default_price = {
+        resolved_default_price = {
             "priceMicros": str(price_micros),
             "currency": "KRW",
         }
+
+    if not isinstance(resolved_default_price, dict):
+        raise ValueError("기본 가격 정보가 필요합니다.")
+    if "priceMicros" not in resolved_default_price or "currency" not in resolved_default_price:
+        raise ValueError("기본 가격 정보에 priceMicros와 currency가 필요합니다.")
 
     service = _get_service()
     package_name = _get_package_name()
@@ -104,14 +129,14 @@ def create_managed_inapp(
     body = {
         "packageName": package_name,
         "sku": sku,
-        "status": "active",
+        "status": status,
         "purchaseType": "managedUser",
         "defaultLanguage": default_language,
-        "defaultPrice": default_price,
+        "defaultPrice": resolved_default_price,
         "listings": listings,
     }
-    if region_prices:
-        body["prices"] = region_prices
+    if resolved_prices:
+        body["prices"] = resolved_prices
     try:
         logger.info(
             "Creating managed in-app product",
@@ -125,4 +150,56 @@ def create_managed_inapp(
         return response
     except HttpError as exc:
         logger.exception("Google API error while creating in-app product")
+        raise RuntimeError(f"Google API 오류: {exc}") from exc
+
+
+def update_managed_inapp(
+    *,
+    sku: str,
+    default_language: str,
+    status: str,
+    default_price: Dict[str, Any],
+    listings: Dict[str, Dict[str, str]],
+    prices: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    if not default_price or "priceMicros" not in default_price or "currency" not in default_price:
+        raise ValueError("기본 가격 정보가 필요합니다.")
+
+    service = _get_service()
+    package_name = _get_package_name()
+
+    body: Dict[str, Any] = {
+        "packageName": package_name,
+        "sku": sku,
+        "status": status,
+        "purchaseType": "managedUser",
+        "defaultLanguage": default_language,
+        "defaultPrice": default_price,
+        "listings": listings,
+    }
+    if prices:
+        body["prices"] = prices
+
+    try:
+        logger.info("Updating managed in-app product", extra={"sku": sku})
+        response = (
+            service.inappproducts()
+            .update(packageName=package_name, sku=sku, body=body)
+            .execute()
+        )
+        logger.debug("Updated in-app product response: %s", response)
+        return response
+    except HttpError as exc:
+        logger.exception("Google API error while updating in-app product")
+        raise RuntimeError(f"Google API 오류: {exc}") from exc
+
+
+def delete_inapp_product(*, sku: str) -> None:
+    service = _get_service()
+    package_name = _get_package_name()
+    try:
+        logger.info("Deleting in-app product", extra={"sku": sku})
+        service.inappproducts().delete(packageName=package_name, sku=sku).execute()
+    except HttpError as exc:
+        logger.exception("Google API error while deleting in-app product")
         raise RuntimeError(f"Google API 오류: {exc}") from exc
