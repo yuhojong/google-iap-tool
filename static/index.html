@@ -36,20 +36,78 @@
         h1, h2 {
             margin: 0 0 1rem;
         }
-        .iap-list {
+        .table-wrapper {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th,
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #e0e0e0;
+            text-align: left;
+            vertical-align: top;
+        }
+        thead th {
+            background: #eef3ff;
+            font-weight: 700;
+            color: #1a237e;
+        }
+        tbody tr:hover {
+            background: #f8fbff;
+        }
+        .description-cell {
+            max-width: 320px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .table-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .table-actions button {
+            flex: 0 0 auto;
+        }
+        button.button-secondary {
+            background: #5f6368;
+        }
+        button.button-danger {
+            background: #d93025;
+        }
+        dialog {
+            border: none;
+            border-radius: 16px;
+            padding: 0;
+            max-width: 640px;
+            width: min(640px, 92vw);
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.2);
+        }
+        dialog::backdrop {
+            background: rgba(0, 0, 0, 0.4);
+        }
+        dialog form {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
             gap: 1rem;
+            padding: 1.5rem;
         }
-        .iap-card {
-            border: 1px solid #e0e0e0;
-            border-radius: 10px;
-            padding: 1rem;
-            background: #fafafa;
+        .dialog-header {
+            margin: 0;
         }
-        .iap-card h3 {
-            margin: 0 0 0.5rem;
-            font-size: 1.1rem;
+        .dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+        }
+        .dialog-actions button.button-secondary {
+            background: #5f6368;
+        }
+        .dialog-hint {
+            margin: 0;
+            color: #555;
+            font-weight: 400;
         }
         form {
             display: grid;
@@ -249,13 +307,58 @@
         </section>
         <section>
             <h2>등록된 상품</h2>
-            <div id="iap-list" class="iap-list"></div>
+            <div id="iap-table-wrapper" class="table-wrapper" hidden>
+                <table class="iap-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">SKU</th>
+                            <th scope="col">이름</th>
+                            <th scope="col">설명</th>
+                            <th scope="col">기본 언어</th>
+                            <th scope="col">가격</th>
+                            <th scope="col">상태</th>
+                            <th scope="col">작업</th>
+                        </tr>
+                    </thead>
+                    <tbody id="iap-table-body"></tbody>
+                </table>
+            </div>
             <div id="empty-state" class="empty" hidden>등록된 상품이 없습니다.</div>
             <div class="pagination">
                 <button id="prev-btn" disabled>이전</button>
                 <button id="next-btn" disabled>다음</button>
             </div>
         </section>
+        <dialog id="edit-dialog">
+            <form id="edit-form">
+                <h3 class="dialog-header">상품 수정</h3>
+                <label>상품 ID (SKU)
+                    <input type="text" id="edit-sku" name="sku" readonly />
+                </label>
+                <label>기본 언어
+                    <select id="edit-default-language" name="default_language" required></select>
+                </label>
+                <label>상태
+                    <select id="edit-status-select" name="status" required></select>
+                </label>
+                <fieldset>
+                    <legend>기본 가격</legend>
+                    <label>priceMicros
+                        <input type="text" id="edit-price-micros" name="price_micros" required />
+                    </label>
+                    <label>통화 코드
+                        <input type="text" id="edit-price-currency" name="currency" maxlength="3" required />
+                    </label>
+                    <p class="hint dialog-hint">Google Play Console 형식과 동일한 마이크로 단위(priceMicros)를 입력하세요.</p>
+                </fieldset>
+                <div class="translations" id="edit-translations"></div>
+                <div class="dialog-actions">
+                    <button type="button" id="edit-cancel-btn" class="button-secondary">취소</button>
+                    <button type="submit">저장</button>
+                </div>
+                <div id="edit-status-message" class="status"></div>
+            </form>
+        </dialog>
         <section>
             <h2>새 상품 만들기</h2>
             <form id="create-form">
@@ -321,7 +424,8 @@
         </section>
     </main>
     <script>
-        const listEl = document.getElementById('iap-list');
+        const tableWrapper = document.getElementById('iap-table-wrapper');
+        const listEl = document.getElementById('iap-table-body');
         const emptyEl = document.getElementById('empty-state');
         const nextBtn = document.getElementById('next-btn');
         const prevBtn = document.getElementById('prev-btn');
@@ -341,11 +445,30 @@
         const importApplyBtn = document.getElementById('import-apply-btn');
         const importStatusEl = document.getElementById('import-status');
         const importPreviewEl = document.getElementById('import-preview');
+        const editDialog = document.getElementById('edit-dialog');
+        const editForm = document.getElementById('edit-form');
+        const editSkuInput = document.getElementById('edit-sku');
+        const editDefaultLanguageSelect = document.getElementById('edit-default-language');
+        const editStatusSelect = document.getElementById('edit-status-select');
+        const editPriceMicrosInput = document.getElementById('edit-price-micros');
+        const editPriceCurrencyInput = document.getElementById('edit-price-currency');
+        const editTranslationsContainer = document.getElementById('edit-translations');
+        const editCancelBtn = document.getElementById('edit-cancel-btn');
+        const editStatusMessage = document.getElementById('edit-status-message');
+        const editSubmitBtn = editForm ? editForm.querySelector('button[type="submit"]') : null;
+
+        const STATUS_OPTIONS = ['active', 'inactive', 'draft'];
+        const STATUS_LABELS = {
+            active: '활성',
+            inactive: '비활성',
+            draft: '초안',
+        };
 
         const tokenStack = [];
         let currentToken = undefined;
         let nextToken = undefined;
         let pendingOperations = [];
+        let editingItem = null;
 
         if (importForm) {
             importForm.addEventListener('submit', (event) => event.preventDefault());
@@ -387,6 +510,313 @@
             container.appendChild(document.createTextNode('지역 가격:'));
             container.appendChild(list);
             return container;
+        }
+
+        function ensureDialogOpen() {
+            if (!editDialog) return;
+            if (typeof editDialog.showModal === 'function') {
+                try {
+                    editDialog.showModal();
+                } catch (error) {
+                    editDialog.setAttribute('open', 'true');
+                }
+            } else {
+                editDialog.setAttribute('open', 'true');
+            }
+        }
+
+        function closeEditDialog() {
+            if (!editDialog) return;
+            if (typeof editDialog.close === 'function' && editDialog.open) {
+                editDialog.close();
+            } else {
+                editDialog.removeAttribute('open');
+            }
+            editingItem = null;
+            if (editStatusMessage) {
+                editStatusMessage.textContent = '';
+            }
+            if (editTranslationsContainer) {
+                editTranslationsContainer.innerHTML = '';
+            }
+            if (editForm) {
+                editForm.reset();
+            }
+        }
+
+        function populateStatusOptions(currentStatus) {
+            if (!editStatusSelect) return;
+            const normalized = (currentStatus || '').toLowerCase();
+            const options = new Map();
+            STATUS_OPTIONS.forEach((status) => {
+                options.set(status, STATUS_LABELS[status] || status);
+            });
+            if (normalized && !options.has(normalized)) {
+                options.set(normalized, currentStatus || normalized);
+            }
+            editStatusSelect.innerHTML = '';
+            options.forEach((label, value) => {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = label;
+                editStatusSelect.appendChild(option);
+            });
+            const preferred = normalized && options.has(normalized) ? normalized : STATUS_OPTIONS[0];
+            editStatusSelect.value = preferred;
+        }
+
+        function populateDefaultLanguageOptions(languages, defaultLanguage) {
+            if (!editDefaultLanguageSelect) return [];
+            const normalized = Array.from(
+                new Set(
+                    [...(languages || []), defaultLanguage]
+                        .filter((language) => typeof language === 'string' && language.trim().length)
+                        .map((language) => language.trim()),
+                ),
+            ).sort((a, b) => a.localeCompare(b));
+            editDefaultLanguageSelect.innerHTML = '';
+            normalized.forEach((language) => {
+                const option = document.createElement('option');
+                option.value = language;
+                option.textContent = language;
+                editDefaultLanguageSelect.appendChild(option);
+            });
+            if (normalized.length) {
+                const preferred = defaultLanguage && normalized.includes(defaultLanguage) ? defaultLanguage : normalized[0];
+                editDefaultLanguageSelect.value = preferred;
+            }
+            return normalized;
+        }
+
+        function renderEditTranslations(item, languages) {
+            if (!editTranslationsContainer) return;
+            editTranslationsContainer.innerHTML = '';
+            if (!languages.length) {
+                const message = document.createElement('p');
+                message.className = 'hint';
+                message.textContent = '번역 정보가 없습니다. 최소 1개의 번역을 입력해주세요.';
+                editTranslationsContainer.appendChild(message);
+                return;
+            }
+            languages.forEach((language) => {
+                const card = document.createElement('div');
+                card.className = 'translation-card';
+                card.dataset.language = language;
+
+                const heading = document.createElement('h4');
+                heading.textContent = language;
+                card.appendChild(heading);
+
+                const titleLabel = document.createElement('label');
+                const titleSpan = document.createElement('span');
+                titleSpan.textContent = '이름';
+                const titleInput = document.createElement('input');
+                titleInput.type = 'text';
+                titleInput.name = `title_${language}`;
+                titleInput.required = true;
+                titleInput.value = item?.listings?.[language]?.title || '';
+                titleLabel.appendChild(titleSpan);
+                titleLabel.appendChild(titleInput);
+                card.appendChild(titleLabel);
+
+                const descriptionLabel = document.createElement('label');
+                const descriptionSpan = document.createElement('span');
+                descriptionSpan.textContent = '설명';
+                const descriptionTextarea = document.createElement('textarea');
+                descriptionTextarea.name = `description_${language}`;
+                descriptionTextarea.rows = 3;
+                descriptionTextarea.required = true;
+                descriptionTextarea.value = item?.listings?.[language]?.description || '';
+                descriptionLabel.appendChild(descriptionSpan);
+                descriptionLabel.appendChild(descriptionTextarea);
+                card.appendChild(descriptionLabel);
+
+                editTranslationsContainer.appendChild(card);
+            });
+        }
+
+        function cloneRegionalPrices(prices) {
+            if (!prices) return undefined;
+            const entries = Object.entries(prices);
+            if (!entries.length) {
+                return undefined;
+            }
+            const cloned = {};
+            entries.forEach(([region, price]) => {
+                if (!price) return;
+                cloned[region] = {
+                    priceMicros: String(price.priceMicros ?? ''),
+                    currency: price.currency || '',
+                };
+            });
+            return Object.keys(cloned).length ? cloned : undefined;
+        }
+
+        function openEditDialog(item) {
+            if (!editForm || !editDialog) return;
+            editingItem = item;
+            editForm.reset();
+            if (editStatusMessage) {
+                editStatusMessage.textContent = '';
+            }
+            const languages = Object.keys(item?.listings || {});
+            const normalizedLanguages = populateDefaultLanguageOptions(languages, item?.defaultLanguage);
+            populateStatusOptions(item?.status || 'active');
+            if (editSkuInput) {
+                editSkuInput.value = item?.sku || '';
+            }
+            if (editPriceMicrosInput) {
+                editPriceMicrosInput.value = item?.defaultPrice?.priceMicros || '';
+            }
+            if (editPriceCurrencyInput) {
+                const currency = item?.defaultPrice?.currency || '';
+                editPriceCurrencyInput.value = currency ? currency.toUpperCase() : '';
+            }
+            renderEditTranslations(item, normalizedLanguages);
+            ensureDialogOpen();
+        }
+
+        async function handleEditSubmit(event) {
+            event.preventDefault();
+            if (!editForm || !editingItem) return;
+            if (!editDefaultLanguageSelect || !editStatusSelect || !editPriceMicrosInput || !editPriceCurrencyInput) return;
+
+            const sku = editingItem.sku;
+            const defaultLanguage = editDefaultLanguageSelect.value;
+            const statusValue = editStatusSelect.value || 'active';
+            const priceMicros = editPriceMicrosInput.value.trim();
+            const currency = editPriceCurrencyInput.value.trim().toUpperCase();
+
+            if (!priceMicros) {
+                if (editStatusMessage) {
+                    editStatusMessage.textContent = '기본 가격 정보를 입력해주세요.';
+                }
+                return;
+            }
+            if (!currency) {
+                if (editStatusMessage) {
+                    editStatusMessage.textContent = '통화 코드를 입력해주세요.';
+                }
+                return;
+            }
+
+            const cards = editTranslationsContainer?.querySelectorAll('.translation-card') || [];
+            const listings = {};
+            let missingLanguage = null;
+            cards.forEach((card) => {
+                const language = card.dataset.language;
+                if (!language) {
+                    return;
+                }
+                const titleInput = card.querySelector(`input[name="title_${language}"]`);
+                const descriptionInput = card.querySelector(`textarea[name="description_${language}"]`);
+                const title = titleInput ? titleInput.value.trim() : '';
+                const description = descriptionInput ? descriptionInput.value.trim() : '';
+                if (!title || !description) {
+                    missingLanguage = language;
+                }
+                listings[language] = { title, description };
+            });
+
+            if (missingLanguage) {
+                if (editStatusMessage) {
+                    editStatusMessage.textContent = `${missingLanguage} 번역은 이름과 설명이 모두 필요합니다.`;
+                }
+                return;
+            }
+            if (!listings[defaultLanguage]) {
+                if (editStatusMessage) {
+                    editStatusMessage.textContent = '기본 언어 번역을 입력해주세요.';
+                }
+                return;
+            }
+
+            const payload = {
+                default_language: defaultLanguage,
+                status: statusValue,
+                default_price: {
+                    priceMicros,
+                    currency,
+                },
+                listings,
+            };
+
+            const regionalPrices = cloneRegionalPrices(editingItem.prices);
+            if (regionalPrices) {
+                payload.prices = regionalPrices;
+            }
+
+            if (editSubmitBtn) {
+                editSubmitBtn.disabled = true;
+            }
+            if (editCancelBtn) {
+                editCancelBtn.disabled = true;
+            }
+            if (editStatusMessage) {
+                editStatusMessage.textContent = '상품을 수정하는 중입니다...';
+            }
+
+            let shouldClose = false;
+            try {
+                const res = await fetch(`/api/inapp/${encodeURIComponent(sku)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '상품 수정에 실패했습니다.');
+                }
+                await fetchList(currentToken);
+                shouldClose = true;
+            } catch (error) {
+                if (editStatusMessage) {
+                    editStatusMessage.textContent = error.message;
+                }
+            } finally {
+                if (editSubmitBtn) {
+                    editSubmitBtn.disabled = false;
+                }
+                if (editCancelBtn) {
+                    editCancelBtn.disabled = false;
+                }
+                if (shouldClose) {
+                    closeEditDialog();
+                }
+            }
+        }
+
+        async function handleDelete(item, triggerButton) {
+            if (!item?.sku) return;
+            const confirmed = window.confirm(`'${item.sku}' 상품을 삭제하시겠습니까?`);
+            if (!confirmed) return;
+            let previousText = '';
+            if (triggerButton) {
+                previousText = triggerButton.textContent;
+                triggerButton.disabled = true;
+                triggerButton.textContent = '삭제 중...';
+            }
+            try {
+                const res = await fetch(`/api/inapp/${encodeURIComponent(item.sku)}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '상품 삭제에 실패했습니다.');
+                }
+                await fetchList(currentToken);
+            } catch (error) {
+                window.alert(error.message);
+            } finally {
+                if (triggerButton) {
+                    triggerButton.disabled = false;
+                    triggerButton.textContent = previousText || '삭제';
+                }
+            }
         }
 
         function renderImportPreview(data) {
@@ -657,6 +1087,21 @@
             importApplyBtn.addEventListener('click', handleImportApply);
         }
 
+        if (editCancelBtn) {
+            editCancelBtn.addEventListener('click', () => {
+                closeEditDialog();
+            });
+        }
+        if (editDialog) {
+            editDialog.addEventListener('cancel', (event) => {
+                event.preventDefault();
+                closeEditDialog();
+            });
+        }
+        if (editForm) {
+            editForm.addEventListener('submit', handleEditSubmit);
+        }
+
         function renderTemplateDetails(template, message) {
             if (message) {
                 templateDescription.textContent = message;
@@ -735,44 +1180,97 @@
                 nextBtn.disabled = !nextToken;
                 prevBtn.disabled = tokenStack.length === 0;
             } catch (error) {
-                listEl.innerHTML = '';
-                emptyEl.hidden = false;
-                emptyEl.textContent = error.message;
+                if (listEl) {
+                    listEl.innerHTML = '';
+                }
+                if (tableWrapper) {
+                    tableWrapper.hidden = true;
+                }
+                if (emptyEl) {
+                    emptyEl.hidden = false;
+                    emptyEl.textContent = error.message;
+                }
                 nextBtn.disabled = true;
                 prevBtn.disabled = tokenStack.length === 0;
             }
         }
 
         function renderList(items) {
-            listEl.innerHTML = '';
-            if (!items.length) {
-                emptyEl.hidden = false;
-                emptyEl.textContent = '등록된 상품이 없습니다.';
+            if (!listEl) {
                 return;
             }
-            emptyEl.hidden = true;
-            items.forEach((item) => {
-                const card = document.createElement('article');
-                card.className = 'iap-card';
-                let priceText = 'N/A';
-                if (item.defaultPrice?.priceMicros) {
-                    const amount = Number(item.defaultPrice.priceMicros) / 1_000_000;
-                    const formatted = amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 });
-                    const currencyCode = item.defaultPrice.currency || '';
-                    priceText = `${formatted} ${currencyCode}`.trim();
+            listEl.innerHTML = '';
+            if (!items.length) {
+                if (tableWrapper) {
+                    tableWrapper.hidden = true;
                 }
+                if (emptyEl) {
+                    emptyEl.hidden = false;
+                    emptyEl.textContent = '등록된 상품이 없습니다.';
+                }
+                return;
+            }
+
+            if (tableWrapper) {
+                tableWrapper.hidden = false;
+            }
+            if (emptyEl) {
+                emptyEl.hidden = true;
+            }
+
+            items.forEach((item) => {
+                const row = document.createElement('tr');
+
+                const skuCell = document.createElement('td');
+                skuCell.textContent = item.sku || '-';
+                row.appendChild(skuCell);
+
                 const defaultListing = (item.listings && item.defaultLanguage && item.listings[item.defaultLanguage])
                     || (item.listings ? Object.values(item.listings)[0] : undefined);
-                const title = defaultListing?.title || item.sku;
-                const description = defaultListing?.description || '-';
-                card.innerHTML = `
-                    <h3>${title}</h3>
-                    <p><strong>SKU:</strong> ${item.sku}</p>
-                    <p><strong>설명:</strong> ${description}</p>
-                    <p><strong>가격:</strong> ${priceText}</p>
-                    <p><strong>상태:</strong> ${item.status || '-'}</p>
-                `;
-                listEl.appendChild(card);
+                const titleCell = document.createElement('td');
+                titleCell.textContent = (defaultListing && defaultListing.title) || item.sku || '-';
+                row.appendChild(titleCell);
+
+                const descriptionCell = document.createElement('td');
+                descriptionCell.className = 'description-cell';
+                descriptionCell.textContent = (defaultListing && defaultListing.description) || '-';
+                row.appendChild(descriptionCell);
+
+                const languageCell = document.createElement('td');
+                languageCell.textContent = item.defaultLanguage || '-';
+                row.appendChild(languageCell);
+
+                const priceCell = document.createElement('td');
+                priceCell.textContent = formatPriceDisplay(item.defaultPrice) || 'N/A';
+                row.appendChild(priceCell);
+
+                const statusCell = document.createElement('td');
+                const statusKey = (item.status || '').toLowerCase();
+                statusCell.textContent = STATUS_LABELS[statusKey] || item.status || '-';
+                row.appendChild(statusCell);
+
+                const actionsCell = document.createElement('td');
+                const actionsWrapper = document.createElement('div');
+                actionsWrapper.className = 'table-actions';
+
+                const editButton = document.createElement('button');
+                editButton.type = 'button';
+                editButton.textContent = '수정';
+                editButton.classList.add('button-secondary');
+                editButton.addEventListener('click', () => openEditDialog(item));
+                actionsWrapper.appendChild(editButton);
+
+                const deleteButton = document.createElement('button');
+                deleteButton.type = 'button';
+                deleteButton.textContent = '삭제';
+                deleteButton.classList.add('button-danger');
+                deleteButton.addEventListener('click', () => handleDelete(item, deleteButton));
+                actionsWrapper.appendChild(deleteButton);
+
+                actionsCell.appendChild(actionsWrapper);
+                row.appendChild(actionsCell);
+
+                listEl.appendChild(row);
             });
         }
 

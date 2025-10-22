@@ -106,6 +106,24 @@ class ImportProductPayload(BaseModel):
         return listings
 
 
+class UpdateInAppRequest(BaseModel):
+    default_language: str = Field(..., min_length=2)
+    status: str = Field(default="active", min_length=1)
+    default_price: PricePayload
+    listings: Dict[str, ListingPayload]
+    prices: Optional[Dict[str, PricePayload]] = None
+
+    @field_validator("listings")
+    @classmethod
+    def ensure_default_language_listing(
+        cls, listings: Dict[str, ListingPayload], info: Dict[str, Any]
+    ) -> Dict[str, ListingPayload]:
+        default_language = info.data.get("default_language")
+        if default_language and default_language not in listings:
+            raise ValueError("기본 언어 번역 정보가 필요합니다.")
+        return listings
+
+
 class ImportOperation(BaseModel):
     action: Literal["create", "update", "delete"]
     sku: str
@@ -512,6 +530,46 @@ async def api_create_inapp(payload: CreateInAppRequest):
         raise
     except Exception as exc:
         logger.exception("Failed to create managed in-app product")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.put("/api/inapp/{sku}")
+async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
+    try:
+        listings_payload = {
+            language: listing.model_dump()
+            for language, listing in payload.listings.items()
+        }
+        prices_payload = (
+            {region: price.model_dump() for region, price in payload.prices.items()}
+            if payload.prices
+            else None
+        )
+        update_managed_inapp(
+            sku=sku,
+            default_language=payload.default_language,
+            status=payload.status,
+            default_price=payload.default_price.model_dump(),
+            listings=listings_payload,
+            prices=prices_payload,
+        )
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("Failed to update managed in-app product")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/api/inapp/{sku}")
+async def api_delete_inapp(sku: str):
+    try:
+        delete_inapp_product(sku=sku)
+        return {"status": "ok"}
+    except Exception as exc:
+        logger.exception("Failed to delete in-app product")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
