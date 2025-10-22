@@ -126,6 +126,16 @@ def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List
     return sorted(languages)
 
 
+def _collect_price_regions_from_products(products: Iterable[Dict[str, Any]]) -> List[str]:
+    regions: set[str] = set()
+    for item in products:
+        prices = item.get("prices") or {}
+        for region in prices.keys():
+            if isinstance(region, str):
+                regions.add(region)
+    return sorted(regions)
+
+
 def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
     listings = item.get("listings") or {}
     normalized_listings: Dict[str, Dict[str, str]] = {}
@@ -142,6 +152,20 @@ def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     default_price = item.get("defaultPrice") or {}
+    prices = item.get("prices") or {}
+    normalized_prices: Dict[str, Dict[str, str]] = {}
+    for region, price in prices.items():
+        if not isinstance(region, str) or not isinstance(price, dict):
+            continue
+        price_micros = price.get("priceMicros")
+        currency = price.get("currency")
+        if price_micros is None and currency is None:
+            continue
+        normalized_prices[region] = {
+            "priceMicros": str(price_micros or ""),
+            "currency": currency or "",
+        }
+
     return {
         "sku": item.get("sku", ""),
         "status": item.get("status", ""),
@@ -151,7 +175,7 @@ def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
             "currency": default_price.get("currency") or "",
         },
         "listings": normalized_listings,
-        "prices": item.get("prices") or None,
+        "prices": normalized_prices or None,
     }
 
 
@@ -200,6 +224,11 @@ def _compute_changes(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str,
             listing_changes[language] = {"from": prev, "to": nxt}
     if listing_changes:
         changes["listings"] = listing_changes
+
+    before_prices = before.get("prices") or {}
+    after_prices = after.get("prices") or {}
+    if before_prices != after_prices:
+        changes["prices"] = {"from": before_prices, "to": after_prices}
     return changes
 
 
@@ -214,6 +243,17 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
         raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
 
     languages = sorted({name.split("title_", 1)[1] for name in reader.fieldnames if name.startswith("title_")})
+    price_regions = {
+        name.split("price_micros_", 1)[1]
+        for name in reader.fieldnames
+        if name.startswith("price_micros_")
+    }
+    price_regions.update(
+        name.split("currency_", 1)[1]
+        for name in reader.fieldnames
+        if name.startswith("currency_")
+    )
+    sorted_regions = sorted(region for region in price_regions if region)
     rows: List[Dict[str, Any]] = []
     seen_skus: set[str] = set()
 
@@ -233,6 +273,7 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
             "price_micros": (row.get("price_micros") or "").strip() or None,
             "currency": (row.get("currency") or "").strip() or None,
             "listings": {},
+            "prices": {},
         }
         for language in languages:
             title_key = f"title_{language}"
@@ -244,6 +285,33 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
                     "title": title,
                     "description": description,
                 }
+
+        for region in sorted_regions:
+            price_key = f"price_micros_{region}"
+            currency_key = f"currency_{region}"
+            raw_price = (row.get(price_key) or "").strip()
+            raw_currency = (row.get(currency_key) or "").strip()
+            if not raw_price and not raw_currency:
+                continue
+            if not raw_price:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{sku} 행: {region} 가격의 price_micros 값을 입력해주세요.",
+                )
+            if not raw_currency:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{sku} 행: {region} 가격의 currency 값을 입력해주세요.",
+                )
+            try:
+                normalized_price = _normalize_price_micros(raw_price)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: {region} 가격 - {exc}") from exc
+            entry["prices"][region] = {"priceMicros": normalized_price, "currency": raw_currency}
+
+        if not entry["prices"]:
+            entry["prices"] = None
+
         rows.append(entry)
 
     return rows, languages
@@ -287,7 +355,7 @@ def _build_import_operations(
                 "default_language": default_language,
                 "default_price": {"priceMicros": price_micros, "currency": currency},
                 "listings": listings,
-                "prices": None,
+                "prices": entry.get("prices") or None,
             }
             operations.append({"action": "create", "sku": sku, "data": new_product})
             summary["create"] += 1
@@ -320,13 +388,21 @@ def _build_import_operations(
         if default_language not in new_listings:
             raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 번역 정보를 제공해야 합니다.")
 
+        new_prices = {
+            region: data.copy()
+            for region, data in (current.get("prices") or {}).items()
+            if isinstance(data, dict)
+        }
+        for region, price_payload in (entry.get("prices") or {}).items():
+            new_prices[region] = price_payload.copy()
+
         new_product = {
             "sku": sku,
             "status": status,
             "default_language": default_language,
             "default_price": {"priceMicros": price_micros, "currency": currency},
             "listings": new_listings,
-            "prices": current.get("prices"),
+            "prices": new_prices or None,
         }
 
         changes = _compute_changes(current, new_product)
@@ -363,8 +439,12 @@ async def api_export_inapp() -> StreamingResponse:
     try:
         products = get_all_inapp_products()
         languages = _collect_languages_from_products(products)
+        price_regions = _collect_price_regions_from_products(products)
         output = io.StringIO()
         fieldnames = ["sku", "status", "default_language", "price_micros", "currency"]
+        for region in price_regions:
+            fieldnames.append(f"price_micros_{region}")
+            fieldnames.append(f"currency_{region}")
         for language in languages:
             fieldnames.append(f"title_{language}")
             fieldnames.append(f"description_{language}")
@@ -379,6 +459,11 @@ async def api_export_inapp() -> StreamingResponse:
                 "price_micros": canonical.get("default_price", {}).get("priceMicros", ""),
                 "currency": canonical.get("default_price", {}).get("currency", ""),
             }
+            prices = canonical.get("prices") or {}
+            for region in price_regions:
+                price_payload = prices.get(region) or {}
+                row[f"price_micros_{region}"] = price_payload.get("priceMicros", "")
+                row[f"currency_{region}"] = price_payload.get("currency", "")
             listings = canonical.get("listings") or {}
             for language in languages:
                 listing = listings.get(language) or {}
