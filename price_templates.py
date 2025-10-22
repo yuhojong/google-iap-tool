@@ -1,14 +1,9 @@
-import json
 import logging
-import os
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from functools import lru_cache
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
-
-PRICE_TEMPLATES_ENV = "PRICE_TEMPLATES"
 
 
 @dataclass(frozen=True)
@@ -70,6 +65,7 @@ def _normalize_price(entry: Dict[str, object], *, context: str) -> NormalizedPri
     currency = entry.get("currency")
     if not currency or not isinstance(currency, str):
         raise ValueError(f"{context}: currency 값을 문자열로 지정해야 합니다.")
+    currency = currency.upper()
 
     price_value = entry.get("price")
     price_micros_value = entry.get("priceMicros") or entry.get("micros")
@@ -101,92 +97,176 @@ def _normalize_price(entry: Dict[str, object], *, context: str) -> NormalizedPri
     return NormalizedPrice(currency=currency, price=price_str, price_micros=price_micros_str)
 
 
-def _parse_template(raw_template: Dict[str, object], *, index: int) -> PriceTemplate:
-    if not isinstance(raw_template, dict):
-        raise ValueError(f"PRICE_TEMPLATES[{index}] 항목은 객체(JSON object)여야 합니다.")
+def _format_decimal_for_display(value: Decimal) -> str:
+    text = f"{value:,.6f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
-    template_id = raw_template.get("id")
-    if not template_id or not isinstance(template_id, str):
-        raise ValueError(f"PRICE_TEMPLATES[{index}]: id 값을 문자열로 지정해야 합니다.")
 
-    label = raw_template.get("label")
-    if not label or not isinstance(label, str):
-        raise ValueError(f"PRICE_TEMPLATES[{index}]: label 값을 문자열로 지정해야 합니다.")
-
-    default_entry = (
-        raw_template.get("default")
-        or raw_template.get("default_price")
-        or raw_template.get("defaultPrice")
-    )
-    if not isinstance(default_entry, dict):
-        raise ValueError(f"PRICE_TEMPLATES[{index}]: default/defaultPrice 항목이 누락되었거나 객체가 아닙니다.")
-
-    default_price = _normalize_price(default_entry, context=f"PRICE_TEMPLATES[{index}].default")
-
-    regions_entry = raw_template.get("regions") or raw_template.get("prices")
-    if regions_entry is None:
-        raise ValueError(f"PRICE_TEMPLATES[{index}]: regions/prices 항목이 필요합니다.")
-    if not isinstance(regions_entry, dict):
-        raise ValueError(f"PRICE_TEMPLATES[{index}]: regions/prices 항목은 객체(JSON object)여야 합니다.")
-
-    region_prices: Dict[str, NormalizedPrice] = {}
-    for region_code, price_entry in regions_entry.items():
-        if not isinstance(region_code, str):
-            raise ValueError(f"PRICE_TEMPLATES[{index}]: 지역 코드는 문자열이어야 합니다.")
-        if not isinstance(price_entry, dict):
-            raise ValueError(
-                f"PRICE_TEMPLATES[{index}]: regions['{region_code}'] 항목은 객체(JSON object)여야 합니다."
+def _extract_update_sort_key(
+    index: int, raw_product: Dict[str, object]
+) -> Tuple[int, int]:
+    timestamp_fields = [
+        "lastUpdateTimeMillis",
+        "lastUpdatedTimestampMillis",
+        "creationTimeMillis",
+        "createdTimeMillis",
+        "updateTimeMillis",
+    ]
+    for field in timestamp_fields:
+        value = raw_product.get(field)
+        if value is None:
+            continue
+        try:
+            timestamp = int(value)
+            return timestamp, index
+        except (TypeError, ValueError):
+            logger.debug(
+                "상품 '%s'의 %s 값을 정수로 변환할 수 없어 무시합니다.",
+                raw_product.get("sku", ""),
+                field,
             )
-        region_prices[region_code] = _normalize_price(
-            price_entry, context=f"PRICE_TEMPLATES[{index}].regions['{region_code}']"
-        )
-
-    description = raw_template.get("description")
-    if description is not None and not isinstance(description, str):
-        raise ValueError(f"PRICE_TEMPLATES[{index}]: description 값은 문자열이어야 합니다.")
-
-    return PriceTemplate(
-        template_id=template_id,
-        label=label,
-        default_price=default_price,
-        region_prices=region_prices,
-        description=description,
-    )
+            continue
+    return -1, index
 
 
-@lru_cache(maxsize=1)
-def _load_templates() -> tuple[PriceTemplate, ...]:
-    raw_value = os.getenv(PRICE_TEMPLATES_ENV)
-    if not raw_value:
-        logger.warning("가격 템플릿 환경 변수 %s 가 설정되어 있지 않습니다.", PRICE_TEMPLATES_ENV)
-        return tuple()
+def generate_price_templates_from_products(
+    products: Iterable[Dict[str, object]]
+) -> List[PriceTemplate]:
+    grouped: Dict[str, Dict[str, object]] = {}
 
-    try:
-        parsed = json.loads(raw_value)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"PRICE_TEMPLATES 환경 변수 JSON 파싱에 실패했습니다: {exc}") from exc
+    for index, raw_product in enumerate(products):
+        if not isinstance(raw_product, dict):
+            continue
 
-    if not isinstance(parsed, list):
-        raise RuntimeError("PRICE_TEMPLATES 환경 변수는 JSON 배열 형식이어야 합니다.")
+        sku = raw_product.get("sku") or ""
+        default_entry = raw_product.get("defaultPrice")
+        if not isinstance(default_entry, dict):
+            logger.debug("상품 '%s'의 기본 가격 정보를 확인할 수 없어 템플릿 생성을 건너뜁니다.", sku)
+            continue
+
+        try:
+            default_price = _normalize_price(default_entry, context=f"상품 '{sku}' 기본 가격")
+        except ValueError as exc:
+            logger.warning("상품 '%s' 기본 가격을 정규화하는 데 실패했습니다: %s", sku, exc)
+            continue
+
+        if default_price.currency.upper() != "KRW":
+            logger.debug("상품 '%s' 기본 통화가 KRW가 아니므로 템플릿에서 제외합니다.", sku)
+            continue
+
+        prices_entry = raw_product.get("prices")
+        region_prices: Dict[str, NormalizedPrice] = {}
+        if prices_entry is not None:
+            if not isinstance(prices_entry, dict):
+                logger.warning("상품 '%s'의 지역 가격 정보가 올바르지 않아 템플릿 생성을 건너뜁니다.", sku)
+                continue
+            valid_regions = True
+            for region_code, price_entry in prices_entry.items():
+                if not isinstance(region_code, str) or not isinstance(price_entry, dict):
+                    valid_regions = False
+                    logger.warning(
+                        "상품 '%s'의 지역 가격 정보 형식이 잘못되었습니다 (region=%r).",
+                        sku,
+                        region_code,
+                    )
+                    break
+                try:
+                    normalized_region = _normalize_price(
+                        price_entry,
+                        context=f"상품 '{sku}' 지역 '{region_code}' 가격",
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "상품 '%s'의 지역 '%s' 가격을 정규화하는 데 실패했습니다: %s",
+                        sku,
+                        region_code,
+                        exc,
+                    )
+                    valid_regions = False
+                    break
+                region_prices[region_code] = normalized_region
+
+            if not valid_regions:
+                continue
+
+        key = default_price.price_micros
+        sort_key = _extract_update_sort_key(index, raw_product)
+
+        record = grouped.get(key)
+        if record is None:
+            record = {
+                "default": default_price,
+                "regions": region_prices,
+                "skus": set(),
+                "sort_key": sort_key,
+            }
+            grouped[key] = record
+        else:
+            if sort_key >= record.get("sort_key", (-1, -1)):
+                record["default"] = default_price
+                record["regions"] = region_prices
+                record["sort_key"] = sort_key
+
+        sku_set = record.setdefault("skus", set())
+        if isinstance(sku_set, set) and sku:
+            sku_set.add(sku)
 
     templates: List[PriceTemplate] = []
-    template_ids: set[str] = set()
-    for index, item in enumerate(parsed):
-        template = _parse_template(item, index=index)
-        if template.template_id in template_ids:
-            raise RuntimeError(f"PRICE_TEMPLATES[{index}]: 중복된 id '{template.template_id}'가 존재합니다.")
-        template_ids.add(template.template_id)
-        templates.append(template)
+    for key, record in grouped.items():
+        default_price = record.get("default")
+        if not isinstance(default_price, NormalizedPrice):
+            continue
 
-    return tuple(templates)
+        region_prices = record.get("regions") or {}
+        try:
+            decimal_price = (Decimal(default_price.price_micros) / Decimal("1000000")).normalize()
+        except (InvalidOperation, ValueError) as exc:
+            logger.warning(
+                "KRW price micros %s 값을 변환하는 데 실패하여 템플릿 생성을 건너뜁니다: %s",
+                key,
+                exc,
+            )
+            continue
+        label = f"₩{_format_decimal_for_display(decimal_price)}"
+
+        sku_collection = record.get("skus")
+        description: Optional[str] = None
+        if isinstance(sku_collection, (set, list)):
+            sku_list = [sku for sku in sku_collection if isinstance(sku, str) and sku]
+            if sku_list:
+                description = f"{len(set(sku_list))}개 상품에서 추출된 가격 템플릿"
+
+        templates.append(
+            PriceTemplate(
+                template_id=f"krw-{key}",
+                label=label,
+                default_price=default_price,
+                region_prices=region_prices,
+                description=description,
+            )
+        )
+
+    templates.sort(key=lambda tpl: int(tpl.default_price.price_micros))
+    return templates
 
 
-def get_price_templates() -> List[Dict[str, object]]:
-    return [template.to_response() for template in _load_templates()]
-
-
-def get_price_template(template_id: str) -> Optional[PriceTemplate]:
-    for template in _load_templates():
+def get_template_by_id(
+    templates: Iterable[PriceTemplate], template_id: str
+) -> Optional[PriceTemplate]:
+    for template in templates:
         if template.template_id == template_id:
             return template
     return None
+
+
+def index_templates_by_price_micros(
+    templates: Iterable[PriceTemplate],
+) -> Dict[str, PriceTemplate]:
+    mapping: Dict[str, PriceTemplate] = {}
+    for template in templates:
+        if template.default_price.currency.upper() != "KRW":
+            continue
+        mapping[template.default_price.price_micros] = template
+    return mapping
