@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +104,39 @@ def _format_decimal_for_display(value: Decimal) -> str:
     return text
 
 
+def _extract_update_sort_key(
+    index: int, raw_product: Dict[str, object]
+) -> Tuple[int, int]:
+    timestamp_fields = [
+        "lastUpdateTimeMillis",
+        "lastUpdatedTimestampMillis",
+        "creationTimeMillis",
+        "createdTimeMillis",
+        "updateTimeMillis",
+    ]
+    for field in timestamp_fields:
+        value = raw_product.get(field)
+        if value is None:
+            continue
+        try:
+            timestamp = int(value)
+            return timestamp, index
+        except (TypeError, ValueError):
+            logger.debug(
+                "상품 '%s'의 %s 값을 정수로 변환할 수 없어 무시합니다.",
+                raw_product.get("sku", ""),
+                field,
+            )
+            continue
+    return -1, index
+
+
 def generate_price_templates_from_products(
     products: Iterable[Dict[str, object]]
 ) -> List[PriceTemplate]:
     grouped: Dict[str, Dict[str, object]] = {}
 
-    for raw_product in products:
+    for index, raw_product in enumerate(products):
         if not isinstance(raw_product, dict):
             continue
 
@@ -129,29 +156,21 @@ def generate_price_templates_from_products(
             logger.debug("상품 '%s' 기본 통화가 KRW가 아니므로 템플릿에서 제외합니다.", sku)
             continue
 
-        key = default_price.price_micros
-        record = grouped.setdefault(
-            key,
-            {
-                "default": default_price,
-                "regions": None,
-                "valid": True,
-                "skus": [],
-            },
-        )
-        record["skus"].append(sku)
-
         prices_entry = raw_product.get("prices")
         region_prices: Dict[str, NormalizedPrice] = {}
         if prices_entry is not None:
             if not isinstance(prices_entry, dict):
-                logger.warning("상품 '%s'의 지역 가격 정보가 올바르지 않아 템플릿에서 제외합니다.", sku)
-                record["valid"] = False
+                logger.warning("상품 '%s'의 지역 가격 정보가 올바르지 않아 템플릿 생성을 건너뜁니다.", sku)
                 continue
-            region_valid = True
+            valid_regions = True
             for region_code, price_entry in prices_entry.items():
                 if not isinstance(region_code, str) or not isinstance(price_entry, dict):
-                    region_valid = False
+                    valid_regions = False
+                    logger.warning(
+                        "상품 '%s'의 지역 가격 정보 형식이 잘못되었습니다 (region=%r).",
+                        sku,
+                        region_code,
+                    )
                     break
                 try:
                     normalized_region = _normalize_price(
@@ -165,29 +184,41 @@ def generate_price_templates_from_products(
                         region_code,
                         exc,
                     )
-                    region_valid = False
+                    valid_regions = False
                     break
                 region_prices[region_code] = normalized_region
 
-            if not region_valid:
-                record["valid"] = False
+            if not valid_regions:
                 continue
 
-        if record["regions"] is None:
-            record["regions"] = region_prices
-        elif record["regions"] != region_prices:
-            logger.info(
-                "KRW price micros %s 그룹의 지역 가격 정보가 일치하지 않아 템플릿에서 제외합니다.",
-                key,
-            )
-            record["valid"] = False
+        key = default_price.price_micros
+        sort_key = _extract_update_sort_key(index, raw_product)
+
+        record = grouped.get(key)
+        if record is None:
+            record = {
+                "default": default_price,
+                "regions": region_prices,
+                "skus": set(),
+                "sort_key": sort_key,
+            }
+            grouped[key] = record
+        else:
+            if sort_key >= record.get("sort_key", (-1, -1)):
+                record["default"] = default_price
+                record["regions"] = region_prices
+                record["sort_key"] = sort_key
+
+        sku_set = record.setdefault("skus", set())
+        if isinstance(sku_set, set) and sku:
+            sku_set.add(sku)
 
     templates: List[PriceTemplate] = []
     for key, record in grouped.items():
-        if not record.get("valid"):
+        default_price = record.get("default")
+        if not isinstance(default_price, NormalizedPrice):
             continue
 
-        default_price = record["default"]
         region_prices = record.get("regions") or {}
         try:
             decimal_price = (Decimal(default_price.price_micros) / Decimal("1000000")).normalize()
@@ -199,10 +230,13 @@ def generate_price_templates_from_products(
             )
             continue
         label = f"₩{_format_decimal_for_display(decimal_price)}"
-        skus: List[str] = [sku for sku in record.get("skus", []) if sku]
+
+        sku_collection = record.get("skus")
         description: Optional[str] = None
-        if skus:
-            description = f"{len(skus)}개 상품에서 추출된 가격 템플릿"
+        if isinstance(sku_collection, (set, list)):
+            sku_list = [sku for sku in sku_collection if isinstance(sku, str) and sku]
+            if sku_list:
+                description = f"{len(set(sku_list))}개 상품에서 추출된 가격 템플릿"
 
         templates.append(
             PriceTemplate(
