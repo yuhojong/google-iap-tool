@@ -34,6 +34,28 @@ iap-manager는 Google Play 관리형 인앱 상품을 조회하고 생성할 수
    ```
 4. 브라우저에서 `http://localhost:8000`에 접속하여 UI를 확인합니다.
 
+## Windows에서 원클릭 실행 스크립트 사용하기
+Windows PC에 Python이 설치되어 있지 않아도 `setup_and_run.ps1` 스크립트 하나로 필요한 구성과 서버 실행을 자동화할 수 있습니다.
+
+1. 프로젝트 루트에 `.env` 파일과 서비스 계정 키 JSON 파일을 준비합니다. `.env`의 경로 값이 상대 경로라면 스크립트가 자동으로 절대 경로로 변환합니다.
+2. PowerShell을 관리자 권한으로 실행한 뒤(설치 과정에서 UAC 확인 창이 표시될 수 있습니다) 스크립트 실행 정책을 일시적으로 완화합니다.
+   ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+   ```
+3. 프로젝트 루트에서 다음 명령으로 스크립트를 실행합니다.
+   ```powershell
+   .\setup_and_run.ps1
+   ```
+
+스크립트는 다음 작업을 순서대로 수행합니다.
+
+- Python 3.11이 설치되어 있지 않으면 공식 설치 프로그램을 다운로드해 사용자 영역에 조용히 설치합니다.
+- 가상환경(`.venv`)을 생성하고 `requirements.txt`에 정의된 모든 의존성을 설치합니다.
+- `.env` 파일을 읽어 필요한 환경 변수를 현재 세션과 사용자 환경 변수에 등록합니다.
+- FastAPI 서버를 `http://localhost:8000`에서 실행합니다.
+
+> **참고:** `.env` 파일이 없으면 환경 변수 등록 단계는 건너뛰며, 스크립트가 설치를 완료한 뒤 종료됩니다.
+
 ## 주요 API
 - `GET /api/inapp/list?token=`: 관리형 인앱 상품 목록 및 페이지 토큰 반환
 - `GET /api/pricing/templates`: `.env`에 정의된 가격 템플릿 목록 반환
