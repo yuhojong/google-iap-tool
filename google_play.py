@@ -56,55 +56,49 @@ def create_managed_inapp(
     *,
     sku: str,
     default_language: str,
-    default_title: str,
-    default_description: str,
     price_won: Optional[int] = None,
-    pricing_template_id: Optional[str] = None,
     translations: Optional[list[dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    if not pricing_template_id:
-        if price_won is None:
-            raise ValueError("가격 또는 가격 템플릿 중 하나는 반드시 지정해야 합니다.")
-        if price_won <= 0:
-            raise ValueError("가격은 양수여야 합니다.")
-        price_micros = price_won * 1_000_000
+    if price_won is None:
+        raise ValueError("가격은 반드시 지정해야 합니다.")
+    if price_won <= 0:
+        raise ValueError("가격은 양수여야 합니다.")
+    price_micros = price_won * 1_000_000
     service = _get_service()
     package_name = _get_package_name()
+    listings: Dict[str, Dict[str, str]] = {}
+    default_listing: Optional[Dict[str, str]] = None
+
+    for item in translations or []:
+        language = item.get("language")
+        title = item.get("title")
+        description = item.get("description")
+        if not language or not title or not description:
+            raise ValueError("모든 번역 항목에는 언어, 이름, 설명이 필요합니다.")
+        listings[language] = {"title": title, "description": description}
+        if language == default_language:
+            default_listing = listings[language]
+
+    if not default_listing:
+        raise ValueError("기본 언어 번역 정보를 찾을 수 없습니다.")
     body = {
         "packageName": package_name,
         "sku": sku,
         "status": "active",
         "purchaseType": "managedUser",
         "defaultLanguage": default_language,
-        "defaultTitle": default_title,
-        "defaultDescription": default_description,
-    }
-    if pricing_template_id:
-        body["pricingTemplateId"] = pricing_template_id
-    else:
-        body["defaultPrice"] = {
+        "defaultPrice": {
             "priceMicros": str(price_micros),
             "currency": "KRW",
-        }
-
-    if translations:
-        listings: Dict[str, Dict[str, str]] = {}
-        for item in translations:
-            language = item.get("language")
-            title = item.get("title")
-            description = item.get("description")
-            if not language or not title or not description:
-                raise ValueError("모든 번역 항목에는 언어, 이름, 설명이 필요합니다.")
-            listings[language] = {"title": title, "description": description}
-        if listings:
-            body["listings"] = listings
+        },
+        "listings": listings,
+    }
     try:
         logger.info(
             "Creating managed in-app product",
             extra={
                 "sku": sku,
                 "default_language": default_language,
-                "using_pricing_template": bool(pricing_template_id),
             },
         )
         response = service.inappproducts().insert(packageName=package_name, body=body).execute()
