@@ -14,6 +14,7 @@ iap-manager는 Google Play 관리형 인앱 상품을 조회하고 생성할 수
    ```env
    PACKAGE_NAME=패키지.이름.예시
    GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
+   PRICE_TEMPLATES=[{"id":"tier_kr_us","label":"KRW 5500 / USD 4.99","default":{"currency":"KRW","price":"5500"},"regions":{"KR":{"currency":"KRW","price":"5500"},"US":{"currency":"USD","price":"4.99"}}}]
    ```
 4. `.gitignore`에 의해 서비스 계정 키 파일은 커밋되지 않습니다.
 
@@ -35,9 +36,23 @@ iap-manager는 Google Play 관리형 인앱 상품을 조회하고 생성할 수
 
 ## 주요 API
 - `GET /api/inapp/list?token=`: 관리형 인앱 상품 목록 및 페이지 토큰 반환
-- `POST /api/inapp/create`: 새 관리형 인앱 상품 생성 (SKU, 제목, 설명, 원화 가격)
+- `GET /api/pricing/templates`: `.env`에 정의된 가격 템플릿 목록 반환
+- `POST /api/inapp/create`: 새 관리형 인앱 상품 생성 (SKU, 기본 언어, 번역, `price_template_id` 또는 직접 입력 가격)
+
+## 가격 템플릿 구성
+`PRICE_TEMPLATES` 환경 변수는 JSON 배열이어야 하며, 각 항목은 다음 필드를 포함합니다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `id` | 템플릿을 식별하는 고유 문자열 |
+| `label` | UI 드롭다운에 표시될 이름 |
+| `default` | `{ "currency": "KRW", "price": "5500" }` 형태의 기본 가격 정보 (`price` 대신 `priceMicros` 사용 가능) |
+| `regions` | 지역 코드(`US`, `KR` 등)를 키로 하고 `{ "currency": "USD", "price": "4.99" }` 형식의 가격을 값으로 갖는 객체 |
+| `description` *(선택)* | 템플릿 설명 문구 |
+
+> **참고:** Google Play Console에서 이미 발행된 국가에는 모두 가격이 지정되어 있어야 API 호출이 성공합니다. 필요한 모든 지역 코드를 `regions`에 포함했는지 확인하세요.
 
 ## 주의 사항
-- 가격은 원화 기준으로 입력하며, API 호출 시 자동으로 마이크로 단위로 변환됩니다.
+- UI에서는 `.env`에 정의된 가격 템플릿만 선택할 수 있으며, 템플릿 정보는 서버 시작 시 로드됩니다.
 - 서비스 계정 키 파일은 절대 저장소에 커밋하지 마세요.
 - Android Publisher API 사용을 위해 필요한 권한이 서비스 계정에 부여되어야 합니다.

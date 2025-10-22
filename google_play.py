@@ -57,13 +57,33 @@ def create_managed_inapp(
     sku: str,
     default_language: str,
     price_won: Optional[int] = None,
+    regional_pricing: Optional[Dict[str, Any]] = None,
     translations: Optional[list[dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    if price_won is None:
-        raise ValueError("가격은 반드시 지정해야 합니다.")
-    if price_won <= 0:
-        raise ValueError("가격은 양수여야 합니다.")
-    price_micros = price_won * 1_000_000
+    if regional_pricing is None and price_won is None:
+        raise ValueError("가격 정보가 필요합니다.")
+    if regional_pricing is not None and price_won is not None:
+        raise ValueError("직접 입력 가격과 템플릿 가격을 동시에 지정할 수 없습니다.")
+
+    default_price: Dict[str, Any]
+    region_prices: Optional[Dict[str, Any]] = None
+
+    if regional_pricing is not None:
+        default_price = regional_pricing.get("defaultPrice")
+        if not isinstance(default_price, dict):
+            raise ValueError("가격 템플릿에 기본 가격 정보가 없습니다.")
+        region_prices = regional_pricing.get("prices")
+        if region_prices is not None and not isinstance(region_prices, dict):
+            raise ValueError("가격 템플릿의 지역 가격 정보가 잘못되었습니다.")
+    else:
+        if price_won is None or price_won <= 0:
+            raise ValueError("가격은 양수여야 합니다.")
+        price_micros = price_won * 1_000_000
+        default_price = {
+            "priceMicros": str(price_micros),
+            "currency": "KRW",
+        }
+
     service = _get_service()
     package_name = _get_package_name()
     listings: Dict[str, Dict[str, str]] = {}
@@ -87,12 +107,11 @@ def create_managed_inapp(
         "status": "active",
         "purchaseType": "managedUser",
         "defaultLanguage": default_language,
-        "defaultPrice": {
-            "priceMicros": str(price_micros),
-            "currency": "KRW",
-        },
+        "defaultPrice": default_price,
         "listings": listings,
     }
+    if region_prices:
+        body["prices"] = region_prices
     try:
         logger.info(
             "Creating managed in-app product",
