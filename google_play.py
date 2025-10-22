@@ -9,6 +9,11 @@ from googleapiclient.errors import HttpError
 logger = logging.getLogger(__name__)
 
 ANDROID_PUBLISHER_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
+EEA_WITHDRAWAL_RIGHT_SERVICE = "WITHDRAWAL_RIGHT_SERVICE"
+
+
+def _build_managed_product_compliance_settings() -> Dict[str, Any]:
+    return {"eeaWithdrawalRightType": EEA_WITHDRAWAL_RIGHT_SERVICE}
 
 
 def _get_package_name() -> str:
@@ -134,6 +139,7 @@ def create_managed_inapp(
         "defaultLanguage": default_language,
         "defaultPrice": resolved_default_price,
         "listings": listings,
+        "managedProductTaxesAndComplianceSettings": _build_managed_product_compliance_settings(),
     }
     if resolved_prices:
         body["prices"] = resolved_prices
@@ -176,6 +182,7 @@ def update_managed_inapp(
         "defaultLanguage": default_language,
         "defaultPrice": default_price,
         "listings": listings,
+        "managedProductTaxesAndComplianceSettings": _build_managed_product_compliance_settings(),
     }
     if prices:
         body["prices"] = prices
