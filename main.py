@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -17,7 +18,12 @@ from google_play import (
     list_inapp_products,
     update_managed_inapp,
 )
-from price_templates import get_price_template, get_price_templates
+from price_templates import (
+    PriceTemplate,
+    generate_price_templates_from_products,
+    get_template_by_id,
+    index_templates_by_price_micros,
+)
 
 load_dotenv()
 
@@ -144,16 +150,6 @@ def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List
     return sorted(languages)
 
 
-def _collect_price_regions_from_products(products: Iterable[Dict[str, Any]]) -> List[str]:
-    regions: set[str] = set()
-    for item in products:
-        prices = item.get("prices") or {}
-        for region in prices.keys():
-            if isinstance(region, str):
-                regions.add(region)
-    return sorted(regions)
-
-
 def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
     listings = item.get("listings") or {}
     normalized_listings: Dict[str, Dict[str, str]] = {}
@@ -197,17 +193,36 @@ def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _normalize_price_micros(value: str) -> str:
+def _normalize_price_won(value: str) -> tuple[str, str]:
     stripped = value.strip().replace(",", "").replace("_", "")
     if not stripped:
-        raise ValueError("가격 정보가 필요합니다.")
+        raise ValueError("KRW 가격 값을 입력해주세요.")
     try:
-        price = int(stripped)
-    except ValueError as exc:  # pragma: no cover - defensive
-        raise ValueError("price_micros 값은 정수여야 합니다.") from exc
-    if price < 0:
-        raise ValueError("가격은 음수가 될 수 없습니다.")
-    return str(price)
+        decimal_value = Decimal(stripped)
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("KRW 가격은 숫자여야 합니다.") from exc
+    if decimal_value <= 0:
+        raise ValueError("KRW 가격은 0보다 커야 합니다.")
+    scaled = decimal_value * Decimal("1000000")
+    if scaled != scaled.to_integral_value():
+        raise ValueError("KRW 가격은 소수점 여섯째 자리까지만 입력할 수 있습니다.")
+    price_micros = scaled.to_integral_value()
+    normalized_price = decimal_value.normalize()
+    price_text = format(normalized_price, "f")
+    return str(int(price_micros)), price_text
+
+
+def _format_price_won_from_micros(price_micros: str, currency: str) -> str:
+    if currency.upper() != "KRW":  # type: ignore[attr-defined]
+        return ""
+    try:
+        decimal_value = Decimal(price_micros) / Decimal("1000000")
+    except (InvalidOperation, ValueError):
+        return ""
+    text = f"{decimal_value:,.6f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
 def _compute_changes(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
@@ -261,17 +276,6 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
         raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
 
     languages = sorted({name.split("title_", 1)[1] for name in reader.fieldnames if name.startswith("title_")})
-    price_regions = {
-        name.split("price_micros_", 1)[1]
-        for name in reader.fieldnames
-        if name.startswith("price_micros_")
-    }
-    price_regions.update(
-        name.split("currency_", 1)[1]
-        for name in reader.fieldnames
-        if name.startswith("currency_")
-    )
-    sorted_regions = sorted(region for region in price_regions if region)
     rows: List[Dict[str, Any]] = []
     seen_skus: set[str] = set()
 
@@ -288,10 +292,9 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
             "sku": sku,
             "status": (row.get("status") or "").strip() or None,
             "default_language": (row.get("default_language") or "").strip() or None,
-            "price_micros": (row.get("price_micros") or "").strip() or None,
-            "currency": (row.get("currency") or "").strip() or None,
+            "price_won": (row.get("price_won") or "").strip() or None,
             "listings": {},
-            "prices": {},
+            "prices": None,
         }
         for language in languages:
             title_key = f"title_{language}"
@@ -304,32 +307,6 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
                     "description": description,
                 }
 
-        for region in sorted_regions:
-            price_key = f"price_micros_{region}"
-            currency_key = f"currency_{region}"
-            raw_price = (row.get(price_key) or "").strip()
-            raw_currency = (row.get(currency_key) or "").strip()
-            if not raw_price and not raw_currency:
-                continue
-            if not raw_price:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{sku} 행: {region} 가격의 price_micros 값을 입력해주세요.",
-                )
-            if not raw_currency:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{sku} 행: {region} 가격의 currency 값을 입력해주세요.",
-                )
-            try:
-                normalized_price = _normalize_price_micros(raw_price)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"{sku} 행: {region} 가격 - {exc}") from exc
-            entry["prices"][region] = {"priceMicros": normalized_price, "currency": raw_currency}
-
-        if not entry["prices"]:
-            entry["prices"] = None
-
         rows.append(entry)
 
     return rows, languages
@@ -338,7 +315,9 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
 def _build_import_operations(
     rows: List[Dict[str, Any]],
     existing_products: Dict[str, Dict[str, Any]],
+    templates_by_price_micros: Dict[str, PriceTemplate] | None = None,
 ) -> Dict[str, Any]:
+    templates_by_price_micros = templates_by_price_micros or {}
     operations: List[Dict[str, Any]] = []
     summary = {"create": 0, "update": 0, "delete": 0}
 
@@ -353,27 +332,36 @@ def _build_import_operations(
             if not default_language:
                 raise HTTPException(status_code=400, detail=f"{sku} 행: default_language 값을 입력해주세요.")
 
-            price_micros_value = entry["price_micros"]
-            if not price_micros_value:
-                raise HTTPException(status_code=400, detail=f"{sku} 행: price_micros 값을 입력해주세요.")
+            price_won_value = entry["price_won"]
+            if not price_won_value:
+                raise HTTPException(status_code=400, detail=f"{sku} 행: price_won 값을 입력해주세요.")
             try:
-                price_micros = _normalize_price_micros(price_micros_value)
+                price_micros, _ = _normalize_price_won(price_won_value)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f"{sku} 행: {exc}") from exc
 
-            currency = entry["currency"] or "KRW"
+            currency = "KRW"
             listings = entry["listings"]
             default_listing = listings.get(default_language)
             if not default_listing or not default_listing.get("title") or not default_listing.get("description"):
                 raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 번역 제목과 설명이 필요합니다.")
 
+            template = templates_by_price_micros.get(price_micros)
+            regional_prices = None
+            if template:
+                pricing_payload = template.to_pricing_payload()
+                regional_prices = pricing_payload.get("prices")
+
             new_product = {
                 "sku": sku,
                 "status": entry["status"] or "active",
                 "default_language": default_language,
-                "default_price": {"priceMicros": price_micros, "currency": currency},
+                "default_price": {
+                    "priceMicros": price_micros,
+                    "currency": currency,
+                },
                 "listings": listings,
-                "prices": entry.get("prices") or None,
+                "prices": regional_prices,
             }
             operations.append({"action": "create", "sku": sku, "data": new_product})
             summary["create"] += 1
@@ -385,15 +373,22 @@ def _build_import_operations(
 
         status = entry["status"] or current.get("status") or "active"
 
-        if entry["price_micros"]:
+        applied_template = False
+        template_prices: Optional[Dict[str, Any]] = None
+        if entry["price_won"]:
             try:
-                price_micros = _normalize_price_micros(entry["price_micros"])
+                price_micros, _ = _normalize_price_won(entry["price_won"])
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=f"{sku} 행: {exc}") from exc
-            currency = entry["currency"] or current.get("default_price", {}).get("currency") or "KRW"
+            currency = "KRW"
+            template = templates_by_price_micros.get(price_micros)
+            if template:
+                pricing_payload = template.to_pricing_payload()
+                template_prices = pricing_payload.get("prices")
+                applied_template = True
         else:
             price_micros = current.get("default_price", {}).get("priceMicros")
-            currency = entry["currency"] or current.get("default_price", {}).get("currency") or ""
+            currency = current.get("default_price", {}).get("currency") or "KRW"
 
         if not price_micros or not currency:
             raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 가격 정보를 확인할 수 없습니다.")
@@ -406,21 +401,29 @@ def _build_import_operations(
         if default_language not in new_listings:
             raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 번역 정보를 제공해야 합니다.")
 
-        new_prices = {
-            region: data.copy()
-            for region, data in (current.get("prices") or {}).items()
-            if isinstance(data, dict)
-        }
-        for region, price_payload in (entry.get("prices") or {}).items():
-            new_prices[region] = price_payload.copy()
+        if applied_template:
+            new_prices = template_prices
+        else:
+            new_prices = {
+                region: data.copy()
+                for region, data in (current.get("prices") or {}).items()
+                if isinstance(data, dict)
+            }
+            for region, price_payload in (entry.get("prices") or {}).items():
+                new_prices[region] = price_payload.copy()
+            if not new_prices:
+                new_prices = None
 
         new_product = {
             "sku": sku,
             "status": status,
             "default_language": default_language,
-            "default_price": {"priceMicros": price_micros, "currency": currency},
+            "default_price": {
+                "priceMicros": price_micros,
+                "currency": currency,
+            },
             "listings": new_listings,
-            "prices": new_prices or None,
+            "prices": new_prices,
         }
 
         changes = _compute_changes(current, new_product)
@@ -457,12 +460,8 @@ async def api_export_inapp() -> StreamingResponse:
     try:
         products = get_all_inapp_products()
         languages = _collect_languages_from_products(products)
-        price_regions = _collect_price_regions_from_products(products)
         output = io.StringIO()
-        fieldnames = ["sku", "status", "default_language", "price_micros", "currency"]
-        for region in price_regions:
-            fieldnames.append(f"price_micros_{region}")
-            fieldnames.append(f"currency_{region}")
+        fieldnames = ["sku", "status", "default_language", "price_won"]
         for language in languages:
             fieldnames.append(f"title_{language}")
             fieldnames.append(f"description_{language}")
@@ -470,18 +469,17 @@ async def api_export_inapp() -> StreamingResponse:
         writer.writeheader()
         for item in products:
             canonical = _canonicalize_product(item)
+            default_price = canonical.get("default_price") or {}
+            default_price_micros = default_price.get("priceMicros") or ""
+            default_currency = default_price.get("currency") or ""
             row = {
                 "sku": canonical.get("sku", ""),
                 "status": canonical.get("status", ""),
                 "default_language": canonical.get("default_language", ""),
-                "price_micros": canonical.get("default_price", {}).get("priceMicros", ""),
-                "currency": canonical.get("default_price", {}).get("currency", ""),
+                "price_won": _format_price_won_from_micros(default_price_micros, default_currency)
+                if default_price_micros
+                else "",
             }
-            prices = canonical.get("prices") or {}
-            for region in price_regions:
-                price_payload = prices.get(region) or {}
-                row[f"price_micros_{region}"] = price_payload.get("priceMicros", "")
-                row[f"currency_{region}"] = price_payload.get("currency", "")
             listings = canonical.get("listings") or {}
             for language in languages:
                 listing = listings.get(language) or {}
@@ -502,8 +500,9 @@ async def api_export_inapp() -> StreamingResponse:
 @app.get("/api/pricing/templates")
 async def api_list_price_templates():
     try:
-        templates = get_price_templates()
-        return {"templates": templates}
+        products = get_all_inapp_products()
+        templates = generate_price_templates_from_products(products)
+        return {"templates": [template.to_response() for template in templates]}
     except Exception as exc:
         logger.exception("Failed to load price templates")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -514,7 +513,9 @@ async def api_create_inapp(payload: CreateInAppRequest):
     try:
         regional_pricing = None
         if payload.price_template_id:
-            template = get_price_template(payload.price_template_id)
+            products = get_all_inapp_products()
+            templates = generate_price_templates_from_products(products)
+            template = get_template_by_id(templates, payload.price_template_id)
             if not template:
                 raise HTTPException(status_code=400, detail="유효하지 않은 가격 템플릿입니다.")
             regional_pricing = template.to_pricing_payload()
@@ -588,11 +589,13 @@ async def api_import_preview(file: UploadFile = File(...)):
             for item in existing_products_raw
             if item.get("sku")
         }
+        templates = generate_price_templates_from_products(existing_products_raw)
+        templates_by_price = index_templates_by_price_micros(templates)
     except Exception as exc:
         logger.exception("Failed to load existing in-app products for import preview")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    operations_payload = _build_import_operations(rows, existing_products)
+    operations_payload = _build_import_operations(rows, existing_products, templates_by_price)
     existing_languages = {
         lang
         for product in existing_products.values()
