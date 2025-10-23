@@ -12,8 +12,14 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import jwt
 import requests
+
+try:  # pragma: no cover - import-time environment check
+    import jwt as _jwt_module
+except ImportError as _jwt_import_error:  # pragma: no cover - handled lazily
+    _jwt_module = None  # type: ignore[assignment]
+else:  # pragma: no cover - exercised when dependency is available
+    _jwt_import_error = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,31 @@ _PRICE_POINTS_CACHE_TTL = int(os.getenv("APP_STORE_PRICE_POINT_CACHE_TTL", "1800
 
 class AppleStoreConfigError(RuntimeError):
     """Raised when required Apple configuration is missing."""
+
+
+def _encode_jwt(payload: Dict[str, Any], private_key: str, headers: Dict[str, str]) -> str:
+    if _jwt_module is None:
+        raise AppleStoreConfigError(
+            "PyJWT 라이브러리가 설치되어 있지 않습니다. requirements.txt의 의존성을 설치해 주세요."
+        ) from _jwt_import_error
+
+    if hasattr(_jwt_module, "encode"):
+        token = _jwt_module.encode(
+            payload, private_key, algorithm="ES256", headers=headers
+        )
+    elif hasattr(_jwt_module, "JWT") and hasattr(_jwt_module, "jwk_from_pem"):
+        jwt_instance = _jwt_module.JWT()
+        jwk_key = _jwt_module.jwk_from_pem(private_key.encode("utf-8"))
+        token = jwt_instance.encode(payload, jwk_key, alg="ES256", headers=headers)
+    else:
+        raise AppleStoreConfigError(
+            "설치된 'jwt' 패키지가 PyJWT가 아니어서 토큰을 생성할 수 없습니다. "
+            "'pip uninstall jwt' 후 'pip install PyJWT'를 실행해 주세요."
+        )
+
+    if isinstance(token, bytes):
+        token = token.decode("utf-8")
+    return token
 
 
 def _require_env(name: str) -> str:
@@ -59,15 +90,7 @@ def _generate_token() -> str:
         "exp": now + 20 * 60,
         "aud": "appstoreconnect-v1",
     }
-    token = jwt.encode(
-        payload,
-        private_key,
-        algorithm="ES256",
-        headers={"kid": key_id, "typ": "JWT"},
-    )
-    if isinstance(token, bytes):
-        token = token.decode("utf-8")
-    return token
+    return _encode_jwt(payload, private_key, {"kid": key_id, "typ": "JWT"})
 
 
 def _auth_headers() -> Dict[str, str]:
