@@ -1,22 +1,33 @@
-# iap-manager
+# iap-management-tool
 
-iap-manager는 Google Play 관리형 인앱 상품을 조회하고 생성할 수 있는 FastAPI 기반 도구입니다.
+**iap-management-tool**은 단일 페이지에서 Google Play와 Apple App Store 인앱 상품을 함께 관리할 수 있는 FastAPI 기반 도구입니다.
 
 ## 구성 요소
 - **FastAPI**: 백엔드 API 제공
-- **google-api-python-client**: Android Publisher API 연동
-- **Vanilla HTML/CSS/JS**: 단일 페이지 사용자 인터페이스
+- **google-api-python-client** / **google-auth**: Google Play Android Publisher API 연동
+- **PyJWT** / **requests**: App Store Connect API 연동
+- **Vanilla HTML/CSS/JS**: 단일 페이지 사용자 인터페이스와 스토어 전환 토글
 
 ## 사전 준비
-1. Google Cloud에서 Android Publisher API가 활성화된 서비스 계정을 생성합니다.
-2. 서비스 계정 키 JSON 파일을 다운로드하고 안전한 위치에 저장합니다.
-3. 프로젝트 루트에 `.env` 파일을 생성하고 다음 값을 설정합니다.
-   ```env
-   PACKAGE_NAME=패키지.이름.예시
-   GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
-   PRICE_TEMPLATES=[{"id":"tier_kr_us","label":"KRW 5500 / USD 4.99","default":{"currency":"KRW","price":"5500"},"regions":{"KR":{"currency":"KRW","price":"5500"},"US":{"currency":"USD","price":"4.99"}}}]
-   ```
-4. `.gitignore`에 의해 서비스 계정 키 파일은 커밋되지 않습니다.
+1. **Google Play**
+   - Android Publisher API가 활성화된 서비스 계정을 생성하고 JSON 키 파일을 준비합니다.
+   - `.env`에 아래 값을 설정합니다.
+     ```env
+     PACKAGE_NAME=패키지.이름.예시
+     GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
+     ```
+   - (선택) 가격 템플릿을 활용하려면 `PRICE_TEMPLATES`에 JSON 배열 형태로 템플릿을 정의합니다.
+2. **Apple App Store**
+   - App Store Connect에서 API 키(ISSUER ID, KEY ID, `.p8` 개인 키)를 생성합니다.
+   - 관리하려는 앱의 App Store Connect 앱 ID를 확인합니다.
+   - `.env`에 아래 값을 추가합니다.
+     ```env
+     APP_STORE_APP_ID=0000000000
+     APP_STORE_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+     APP_STORE_KEY_ID=ABC123XYZ
+     APP_STORE_PRIVATE_KEY_PATH=./AuthKey_ABC123XYZ.p8
+     ```
+3. `.gitignore`에 의해 민감한 키 파일은 커밋되지 않습니다.
 
 ## 실행 방법
 1. 가상환경을 생성하고 활성화합니다.
@@ -55,11 +66,14 @@ iap-manager는 Google Play 관리형 인앱 상품을 조회하고 생성할 수
 > **참고:** `.env` 파일이 없으면 환경 변수 등록 단계를 건너뜁니다. PowerShell 실행 정책이 허용된다면 기존 `setup_and_run.ps1` 스크립트를 그대로 사용할 수도 있습니다.
 
 ## 주요 API
-- `GET /api/inapp/list?token=`: 관리형 인앱 상품 목록 및 페이지 토큰 반환
-- `GET /api/pricing/templates`: `.env`에 정의된 가격 템플릿 목록 반환
-- `POST /api/inapp/create`: 새 관리형 인앱 상품 생성 (SKU, 기본 언어, 번역, `price_template_id` 또는 직접 입력 가격)
+- `GET /api/google/inapp/list?token=`: Google Play 인앱 상품 목록 조회 (캐시 기반 페이지네이션)
+- `GET /api/google/pricing/templates`: Google Play 가격 템플릿 목록 반환
+- `POST /api/google/inapp/create`: Google Play 인앱 상품 생성
+- `GET /api/apple/inapp/list`: Apple 인앱 상품 목록 조회 (App Store Connect API)
+- `POST /api/apple/inapp/create`: Apple 인앱 상품 생성 및 현지화/가격 설정
+- `POST /api/apple/inapp/import/preview` / `apply`: Apple CSV 일괄 작업 미리보기 및 적용
 
-## 가격 템플릿 구성
+## Google 가격 템플릿 구성
 `PRICE_TEMPLATES` 환경 변수는 JSON 배열이어야 하며, 각 항목은 다음 필드를 포함합니다.
 
 | 필드 | 설명 |
@@ -71,6 +85,8 @@ iap-manager는 Google Play 관리형 인앱 상품을 조회하고 생성할 수
 | `description` *(선택)* | 템플릿 설명 문구 |
 
 > **참고:** Google Play Console에서 이미 발행된 국가에는 모두 가격이 지정되어 있어야 API 호출이 성공합니다. 필요한 모든 지역 코드를 `regions`에 포함했는지 확인하세요.
+
+Apple App Store는 App Store Connect 가격 티어를 사용하므로 별도의 템플릿이 필요하지 않습니다. UI에서 기준 판매 지역을 선택하면 `/api/apple/pricing/tiers`를 통해 해당 지역의 가격 티어 목록을 로드합니다.
 
 ## 주의 사항
 - UI에서는 `.env`에 정의된 가격 템플릿만 선택할 수 있으며, 템플릿 정보는 서버 시작 시 로드됩니다.

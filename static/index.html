@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>IAP 관리자</title>
+    <title>IAP Management Tool</title>
     <style>
         :root {
             color-scheme: light dark;
@@ -31,6 +31,30 @@
             font-size: 2rem;
             font-weight: 700;
         }
+        .store-toggle {
+            display: flex;
+            justify-content: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+        .store-toggle button {
+            padding: 0.5rem 1.1rem;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            background: rgba(255, 255, 255, 0.18);
+            color: inherit;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .store-toggle button.is-active {
+            background: #fff;
+            color: #1a73e8;
+            box-shadow: 0 8px 20px rgba(26, 115, 232, 0.24);
+        }
+        .store-toggle button:hover {
+            background: rgba(255, 255, 255, 0.28);
+        }
         nav.menu {
             display: flex;
             flex-wrap: wrap;
@@ -57,12 +81,22 @@
             color: #1a73e8;
             box-shadow: 0 10px 24px rgba(26, 115, 232, 0.24);
         }
+        nav.menu[data-store] {
+            display: none;
+        }
+        body[data-store="google"] nav.menu[data-store="google"],
+        body[data-store="apple"] nav.menu[data-store="apple"] {
+            display: flex;
+        }
         main {
             display: grid;
             gap: 2rem;
             padding: 2rem;
             max-width: 1200px;
             margin: 0 auto;
+        }
+        .store-pane[hidden] {
+            display: none;
         }
         .app-section {
             background: #fff;
@@ -121,6 +155,54 @@
             font-size: 0.9rem;
             padding: 0.25rem 0.5rem;
             border-radius: 8px;
+        }
+        .form-grid {
+            display: grid;
+            gap: 1rem;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        }
+        .checkbox-group {
+            display: flex;
+            gap: 1.5rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .form-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.75rem;
+        }
+        .form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        .localization-grid {
+            display: grid;
+            gap: 1rem;
+        }
+        .localization-card {
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 1rem;
+            display: grid;
+            gap: 0.75rem;
+            background: #fafafa;
+        }
+        .localization-card header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .localization-card header h4 {
+            margin: 0;
+            font-size: 1rem;
+        }
+        .localization-card .actions {
+            display: flex;
+            gap: 0.5rem;
         }
         .status {
             margin-top: 0.5rem;
@@ -423,16 +505,26 @@
 <body>
     <header>
         <div class="header-inner">
-            <h1>Google Play IAP 관리자</h1>
-            <nav class="menu" aria-label="주요 메뉴">
+            <h1>IAP Management Tool</h1>
+            <div class="store-toggle" role="tablist" aria-label="스토어 선택">
+                <button type="button" class="store-toggle-btn is-active" data-store="google" aria-selected="true">Google Play</button>
+                <button type="button" class="store-toggle-btn" data-store="apple" aria-selected="false">Apple App Store</button>
+            </div>
+            <nav class="menu" data-store="google" aria-label="Google Play 메뉴">
                 <button type="button" class="menu-button is-active" data-target="section-bulk-management">IAP 벌크 관리</button>
                 <button type="button" class="menu-button" data-target="section-bulk-create">신규 IAP 벌크 등록</button>
                 <button type="button" class="menu-button" data-target="section-single-create">신규 IAP 등록</button>
                 <button type="button" class="menu-button" data-target="section-product-management">등록된 상품 관리</button>
             </nav>
+            <nav class="menu" data-store="apple" aria-label="Apple App Store 메뉴">
+                <button type="button" class="menu-button is-active" data-target="apple-section-products">인앱 상품 목록</button>
+                <button type="button" class="menu-button" data-target="apple-section-editor">인앱 상품 생성/수정</button>
+                <button type="button" class="menu-button" data-target="apple-section-csv">CSV 도구</button>
+            </nav>
         </div>
     </header>
     <main>
+        <section class="store-pane" data-store="google">
         <section id="section-bulk-management" class="app-section">
             <div>
                 <h2>IAP 벌크 관리</h2>
@@ -625,49 +717,195 @@
                 <div id="edit-status-message" class="status"></div>
             </form>
         </dialog>
+        </section>
+        <section class="store-pane" data-store="apple" hidden>
+            <section id="apple-section-products" class="app-section">
+                <div>
+                    <h2>Apple App Store 인앱상품 목록</h2>
+                    <p class="hint">App Store Connect API를 통해 인앱 상품을 조회하고 CSV로 내보내거나 일괄 업데이트할 수 있습니다.</p>
+                </div>
+                <div class="csv-actions">
+                    <button type="button" id="apple-refresh-btn">목록 새로고침</button>
+                    <button type="button" id="apple-export-btn">CSV 내보내기</button>
+                    <input type="file" id="apple-import-file" accept=".csv" />
+                    <button type="button" id="apple-import-preview-btn">CSV 미리보기</button>
+                    <button type="button" id="apple-import-apply-btn" disabled>CSV 적용</button>
+                </div>
+                <div id="apple-status" class="status"></div>
+                <div class="initial-loading" id="apple-loading" hidden>
+                    <p class="hint">Apple 인앱 상품을 불러오는 중입니다...</p>
+                    <div class="progress-bar"><div class="progress-bar-fill" id="apple-loading-bar"></div></div>
+                </div>
+                <div class="table-wrapper" id="apple-table-wrapper" hidden>
+                    <table class="iap-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">상품 ID</th>
+                                <th scope="col">참조 이름</th>
+                                <th scope="col">타입</th>
+                                <th scope="col">상태</th>
+                                <th scope="col">가격 티어</th>
+                                <th scope="col">판매 여부</th>
+                                <th scope="col">작업</th>
+                            </tr>
+                        </thead>
+                        <tbody id="apple-table-body"></tbody>
+                    </table>
+                </div>
+                <div id="apple-empty-state" class="empty" hidden>등록된 Apple 인앱 상품이 없습니다.</div>
+            </section>
+            <section id="apple-section-editor" class="app-section" hidden>
+                <div>
+                    <h2>Apple 인앱 상품 등록/수정</h2>
+                    <p class="hint">필수 정보와 현지화 정보를 입력한 뒤 저장하면 새로운 인앱 상품을 생성하거나 기존 상품을 업데이트합니다.</p>
+                </div>
+                <form id="apple-form">
+                    <div class="form-grid">
+                        <label>
+                            상품 ID (productId)
+                            <input type="text" id="apple-product-id" name="product_id" required />
+                        </label>
+                        <label>
+                            참조 이름
+                            <input type="text" id="apple-reference-name" name="reference_name" required />
+                        </label>
+                        <label>
+                            인앱 상품 타입
+                            <select id="apple-purchase-type" name="purchase_type" required>
+                                <option value="consumable">소모성</option>
+                                <option value="nonConsumable">비소모성</option>
+                                <option value="nonRenewingSubscription">비갱신형 구독</option>
+                                <option value="autoRenewableSubscription">자동 갱신형 구독</option>
+                            </select>
+                        </label>
+                        <label>
+                            가격 티어
+                            <select id="apple-price-tier" name="price_tier"></select>
+                        </label>
+                        <label>
+                            기준 판매 지역
+                            <input type="text" id="apple-base-territory" name="base_territory" value="KOR" maxlength="3" />
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label><input type="checkbox" id="apple-cleared-for-sale" checked /> 판매 가능</label>
+                        <label><input type="checkbox" id="apple-family-sharable" /> 패밀리 공유 가능</label>
+                    </div>
+                    <label>
+                        심사 메모
+                        <textarea id="apple-review-note" rows="3" placeholder="필요한 경우 심사 메모를 입력하세요."></textarea>
+                    </label>
+                    <div>
+                        <div class="form-header">
+                            <h3>현지화 정보</h3>
+                            <button type="button" id="apple-add-locale-btn" class="button-secondary">현지화 추가</button>
+                        </div>
+                        <div id="apple-localizations" class="localization-grid"></div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="reset" class="button-secondary" id="apple-reset-btn">초기화</button>
+                        <button type="submit" id="apple-submit-btn">저장</button>
+                    </div>
+                    <div id="apple-form-status" class="status"></div>
+                </form>
+            </section>
+            <section id="apple-section-csv" class="app-section" hidden>
+                <h2>CSV 미리보기</h2>
+                <div id="apple-import-preview"></div>
+            </section>
+        </section>
     </main>
     <script>
-        const SECTION_IDS = {
-            bulkManagement: 'section-bulk-management',
-            bulkCreate: 'section-bulk-create',
-            singleCreate: 'section-single-create',
-            productManagement: 'section-product-management',
-        };
-        const navButtons = document.querySelectorAll('.menu-button');
-        const sectionMap = new Map([
-            [SECTION_IDS.bulkManagement, document.getElementById(SECTION_IDS.bulkManagement)],
-            [SECTION_IDS.bulkCreate, document.getElementById(SECTION_IDS.bulkCreate)],
-            [SECTION_IDS.singleCreate, document.getElementById(SECTION_IDS.singleCreate)],
-            [SECTION_IDS.productManagement, document.getElementById(SECTION_IDS.productManagement)],
-        ]);
-        let activeSectionId = SECTION_IDS.bulkManagement;
+        const storeToggleButtons = document.querySelectorAll('.store-toggle-btn');
+        const storePanes = document.querySelectorAll('.store-pane');
+        let activeStore = 'google';
+        document.body.dataset.store = activeStore;
+        storePanes.forEach((pane) => {
+            if (pane.dataset.store && pane.dataset.store !== activeStore) {
+                pane.hidden = true;
+            }
+        });
 
-        function setActiveSection(id) {
-            if (!sectionMap.has(id)) {
+        const STORE_SECTIONS = {
+            google: {
+                default: 'section-bulk-management',
+                buttons: Array.from(
+                    document.querySelectorAll('nav.menu[data-store="google"] .menu-button')
+                ),
+                sections: new Map([
+                    ['section-bulk-management', document.getElementById('section-bulk-management')],
+                    ['section-bulk-create', document.getElementById('section-bulk-create')],
+                    ['section-single-create', document.getElementById('section-single-create')],
+                    ['section-product-management', document.getElementById('section-product-management')],
+                ]),
+            },
+            apple: {
+                default: 'apple-section-products',
+                buttons: Array.from(
+                    document.querySelectorAll('nav.menu[data-store="apple"] .menu-button')
+                ),
+                sections: new Map([
+                    ['apple-section-products', document.getElementById('apple-section-products')],
+                    ['apple-section-editor', document.getElementById('apple-section-editor')],
+                    ['apple-section-csv', document.getElementById('apple-section-csv')],
+                ]),
+            },
+        };
+        const activeSections = {
+            google: STORE_SECTIONS.google.default,
+            apple: STORE_SECTIONS.apple.default,
+        };
+
+        function setActiveSection(store, id) {
+            const config = STORE_SECTIONS[store];
+            if (!config || !config.sections.has(id)) {
                 return;
             }
-            activeSectionId = id;
-            sectionMap.forEach((section, key) => {
+            activeSections[store] = id;
+            config.sections.forEach((section, key) => {
                 if (!section) return;
                 section.hidden = key !== id;
             });
-            navButtons.forEach((button) => {
-                if (button.dataset.target === id) {
-                    button.classList.add('is-active');
-                } else {
-                    button.classList.remove('is-active');
-                }
+            config.buttons.forEach((button) => {
+                const isActive = button.dataset.target === id;
+                button.classList.toggle('is-active', isActive);
             });
         }
 
-        navButtons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const target = button.dataset.target;
-                setActiveSection(target);
+        function setActiveStore(store) {
+            if (!store || activeStore === store) {
+                return;
+            }
+            activeStore = store;
+            document.body.dataset.store = store;
+            storeToggleButtons.forEach((button) => {
+                const isActive = button.dataset.store === store;
+                button.classList.toggle('is-active', isActive);
+                button.setAttribute('aria-selected', isActive ? 'true' : 'false');
             });
-        });
+            storePanes.forEach((pane) => {
+                if (!pane.dataset.store) return;
+                pane.hidden = pane.dataset.store !== store;
+            });
+            if (store === 'google') {
+                setActiveSection('google', activeSections.google);
+            } else if (store === 'apple') {
+                setActiveSection('apple', activeSections.apple);
+                ensureAppleInitialized();
+            }
+        }
 
-        setActiveSection(activeSectionId);
+        Object.entries(STORE_SECTIONS).forEach(([store, config]) => {
+            config.buttons.forEach((button) => {
+                button.addEventListener('click', () => {
+                    const target = button.dataset.target;
+                    if (target) {
+                        setActiveSection(store, target);
+                    }
+                });
+            });
+            setActiveSection(store, activeSections[store]);
+        });
 
         const tableWrapper = document.getElementById('iap-table-wrapper');
         const listEl = document.getElementById('iap-table-body');
@@ -1226,7 +1464,7 @@
                 editStatusMessage.textContent = '저장 중입니다...';
             }
             try {
-                const res = await fetch(`/api/inapp/${encodeURIComponent(editingItem.sku)}`, {
+                const res = await fetch(`/api/google/inapp/${encodeURIComponent(editingItem.sku)}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -1263,7 +1501,7 @@
                 triggerButton.textContent = '삭제 중...';
             }
             try {
-                const res = await fetch(`/api/inapp/${encodeURIComponent(item.sku)}`, { method: 'DELETE' });
+                const res = await fetch(`/api/google/inapp/${encodeURIComponent(item.sku)}`, { method: 'DELETE' });
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
                     const detail = Array.isArray(err.detail)
@@ -1605,7 +1843,7 @@
                 exportBtn.disabled = true;
             }
             try {
-                const res = await fetch('/api/inapp/export');
+                const res = await fetch('/api/google/inapp/export');
                 if (!res.ok) {
                     throw new Error('CSV 내보내기에 실패했습니다.');
                 }
@@ -1644,7 +1882,7 @@
             formData.append('file', importFileInput.files[0]);
             let previewSucceeded = false;
             try {
-                const res = await fetch('/api/inapp/import/preview', {
+                const res = await fetch('/api/google/inapp/import/preview', {
                     method: 'POST',
                     body: formData,
                 });
@@ -1696,7 +1934,7 @@
                     }
                     return base;
                 });
-                const res = await fetch('/api/inapp/import/apply', {
+                const res = await fetch('/api/google/inapp/import/apply', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ operations: operationsPayload }),
@@ -1732,7 +1970,7 @@
                 newTemplateBtn.disabled = true;
             }
             try {
-                const res = await fetch(`/api/inapp/new/template?row_count=${rowCount}`);
+                const res = await fetch(`/api/google/inapp/new/template?row_count=${rowCount}`);
                 if (!res.ok) {
                     throw new Error('템플릿 다운로드에 실패했습니다.');
                 }
@@ -1772,7 +2010,7 @@
             formData.append('file', newImportFileInput.files[0]);
             let previewSucceeded = false;
             try {
-                const res = await fetch('/api/inapp/new/import/preview', {
+                const res = await fetch('/api/google/inapp/new/import/preview', {
                     method: 'POST',
                     body: formData,
                 });
@@ -1824,7 +2062,7 @@
                     }
                     return base;
                 });
-                const res = await fetch('/api/inapp/new/import/apply', {
+                const res = await fetch('/api/google/inapp/new/import/apply', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ operations: operationsPayload }),
@@ -1900,7 +2138,7 @@
                 setInitialProgressMessage('가격 템플릿을 불러오는 중...');
             }
             try {
-                const res = await fetch('/api/pricing/templates');
+                const res = await fetch('/api/google/pricing/templates');
                 if (!res.ok) {
                     throw new Error('가격 템플릿을 불러오지 못했습니다.');
                 }
@@ -1972,7 +2210,7 @@
                     params.set('page_size', String(pageSize));
                 }
                 const query = params.toString();
-                const res = await fetch(`/api/inapp/list${query ? `?${query}` : ''}`);
+                const res = await fetch(`/api/google/inapp/list${query ? `?${query}` : ''}`);
                 if (!res.ok) {
                     throw new Error('목록을 불러오지 못했습니다.');
                 }
@@ -2086,7 +2324,7 @@
 
             statusEl.textContent = '상품을 생성 중입니다...';
             try {
-                const res = await fetch('/api/inapp/create', {
+                const res = await fetch('/api/google/inapp/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -2109,6 +2347,603 @@
             } catch (error) {
                 statusEl.textContent = error.message;
             }
+        });
+
+        const appleRefreshBtn = document.getElementById('apple-refresh-btn');
+        const appleExportBtn = document.getElementById('apple-export-btn');
+        const appleImportFileInput = document.getElementById('apple-import-file');
+        const appleImportPreviewBtn = document.getElementById('apple-import-preview-btn');
+        const appleImportApplyBtn = document.getElementById('apple-import-apply-btn');
+        const appleStatusEl = document.getElementById('apple-status');
+        const appleLoadingEl = document.getElementById('apple-loading');
+        const appleLoadingBar = document.getElementById('apple-loading-bar');
+        const appleTableWrapper = document.getElementById('apple-table-wrapper');
+        const appleTableBody = document.getElementById('apple-table-body');
+        const appleEmptyState = document.getElementById('apple-empty-state');
+        const appleForm = document.getElementById('apple-form');
+        const appleProductIdInput = document.getElementById('apple-product-id');
+        const appleReferenceNameInput = document.getElementById('apple-reference-name');
+        const applePurchaseTypeSelect = document.getElementById('apple-purchase-type');
+        const applePriceTierSelect = document.getElementById('apple-price-tier');
+        const appleBaseTerritoryInput = document.getElementById('apple-base-territory');
+        const appleClearedForSaleCheckbox = document.getElementById('apple-cleared-for-sale');
+        const appleFamilySharableCheckbox = document.getElementById('apple-family-sharable');
+        const appleReviewNoteInput = document.getElementById('apple-review-note');
+        const appleLocalizationContainer = document.getElementById('apple-localizations');
+        const appleAddLocaleBtn = document.getElementById('apple-add-locale-btn');
+        const appleFormStatus = document.getElementById('apple-form-status');
+        const appleSubmitBtn = document.getElementById('apple-submit-btn');
+        const appleResetBtn = document.getElementById('apple-reset-btn');
+        const appleImportPreviewEl = document.getElementById('apple-import-preview');
+
+        const appleState = {
+            initialized: false,
+            items: [],
+            priceTiersTerritory: '',
+            priceTiers: [],
+        };
+        let appleImportPreviewData = null;
+
+        function populateApplePriceTierOptions(tiers) {
+            if (!applePriceTierSelect) return;
+            const currentValue = applePriceTierSelect.value;
+            applePriceTierSelect.innerHTML = '<option value="">티어 선택 안 함</option>';
+            tiers.forEach((tier) => {
+                const option = document.createElement('option');
+                option.value = tier.tier;
+                const priceText = tier.customerPrice && tier.currency ? ` (${tier.currency} ${tier.customerPrice})` : '';
+                option.textContent = `${tier.tier}${priceText}`;
+                applePriceTierSelect.appendChild(option);
+            });
+            if (currentValue) {
+                applePriceTierSelect.value = currentValue;
+            }
+        }
+
+        function addAppleLocalization(locale = 'ko-KR', name = '', description = '') {
+            if (!appleLocalizationContainer) return;
+            const card = document.createElement('div');
+            card.className = 'localization-card';
+            const header = document.createElement('header');
+            const heading = document.createElement('h4');
+            heading.textContent = locale || '신규 현지화';
+            header.appendChild(heading);
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'button-secondary';
+            removeBtn.textContent = '삭제';
+            removeBtn.addEventListener('click', () => {
+                card.remove();
+            });
+            actions.appendChild(removeBtn);
+            header.appendChild(actions);
+            card.appendChild(header);
+
+            const localeLabel = document.createElement('label');
+            localeLabel.textContent = '언어 코드';
+            const localeInput = document.createElement('input');
+            localeInput.type = 'text';
+            localeInput.placeholder = '예: ko-KR';
+            localeInput.value = locale;
+            localeInput.className = 'apple-locale-input';
+            localeLabel.appendChild(localeInput);
+            card.appendChild(localeLabel);
+
+            const nameLabel = document.createElement('label');
+            nameLabel.textContent = '이름';
+            const nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.required = true;
+            nameInput.value = name;
+            nameInput.className = 'apple-name-input';
+            nameLabel.appendChild(nameInput);
+            card.appendChild(nameLabel);
+
+            const descriptionLabel = document.createElement('label');
+            descriptionLabel.textContent = '설명';
+            const descriptionTextarea = document.createElement('textarea');
+            descriptionTextarea.rows = 3;
+            descriptionTextarea.required = true;
+            descriptionTextarea.value = description;
+            descriptionTextarea.className = 'apple-description-input';
+            descriptionLabel.appendChild(descriptionTextarea);
+            card.appendChild(descriptionLabel);
+
+            localeInput.addEventListener('input', () => {
+                heading.textContent = localeInput.value || '신규 현지화';
+            });
+
+            appleLocalizationContainer.appendChild(card);
+        }
+
+        function resetAppleForm() {
+            if (!appleForm) return;
+            appleForm.dataset.mode = 'create';
+            appleForm.dataset.productId = '';
+            if (appleProductIdInput) {
+                appleProductIdInput.value = '';
+                appleProductIdInput.readOnly = false;
+            }
+            if (appleReferenceNameInput) appleReferenceNameInput.value = '';
+            if (applePurchaseTypeSelect) {
+                applePurchaseTypeSelect.disabled = false;
+                applePurchaseTypeSelect.value = applePurchaseTypeSelect.options[0]?.value || 'consumable';
+            }
+            if (applePriceTierSelect) applePriceTierSelect.value = '';
+            if (appleBaseTerritoryInput) appleBaseTerritoryInput.value = 'KOR';
+            if (appleClearedForSaleCheckbox) appleClearedForSaleCheckbox.checked = true;
+            if (appleFamilySharableCheckbox) appleFamilySharableCheckbox.checked = false;
+            if (appleReviewNoteInput) appleReviewNoteInput.value = '';
+            if (appleLocalizationContainer) {
+                appleLocalizationContainer.innerHTML = '';
+                addAppleLocalization('ko-KR');
+            }
+            if (appleFormStatus) appleFormStatus.textContent = '';
+            if (appleSubmitBtn) appleSubmitBtn.textContent = '저장';
+        }
+
+        function gatherAppleLocalizations() {
+            const result = [];
+            if (!appleLocalizationContainer) return result;
+            const cards = appleLocalizationContainer.querySelectorAll('.localization-card');
+            cards.forEach((card) => {
+                const localeInput = card.querySelector('.apple-locale-input');
+                const nameInput = card.querySelector('.apple-name-input');
+                const descriptionInput = card.querySelector('.apple-description-input');
+                const locale = (localeInput?.value || '').trim();
+                const name = (nameInput?.value || '').trim();
+                const description = (descriptionInput?.value || '').trim();
+                if (!locale || !name || !description) {
+                    return;
+                }
+                result.push({ locale, name, description });
+            });
+            return result;
+        }
+
+        function renderAppleTable(items = appleState.items) {
+            if (!appleTableBody || !appleTableWrapper || !appleEmptyState) return;
+            appleTableBody.innerHTML = '';
+            if (!items.length) {
+                appleTableWrapper.hidden = true;
+                appleEmptyState.hidden = false;
+                return;
+            }
+            appleTableWrapper.hidden = false;
+            appleEmptyState.hidden = true;
+            items.forEach((item) => {
+                const productId = item.productId || item.sku || '';
+                const referenceName = item.referenceName || '';
+                const type = item.type || '';
+                const state = item.state || '';
+                const priceTier = Array.isArray(item.prices) && item.prices.length ? item.prices[0].priceTier || '' : '';
+                const cleared = item.clearedForSale ? '예' : '아니오';
+                const tr = document.createElement('tr');
+                const idTd = document.createElement('td');
+                idTd.textContent = productId;
+                tr.appendChild(idTd);
+                const nameTd = document.createElement('td');
+                nameTd.textContent = referenceName;
+                tr.appendChild(nameTd);
+                const typeTd = document.createElement('td');
+                typeTd.textContent = type;
+                tr.appendChild(typeTd);
+                const stateTd = document.createElement('td');
+                stateTd.textContent = state;
+                tr.appendChild(stateTd);
+                const tierTd = document.createElement('td');
+                tierTd.textContent = priceTier || '-';
+                tr.appendChild(tierTd);
+                const clearedTd = document.createElement('td');
+                clearedTd.textContent = cleared;
+                tr.appendChild(clearedTd);
+                const actionsTd = document.createElement('td');
+                const editBtn = document.createElement('button');
+                editBtn.type = 'button';
+                editBtn.className = 'button-secondary';
+                editBtn.textContent = '수정';
+                editBtn.addEventListener('click', () => openAppleEditor(item));
+                const deleteBtn = document.createElement('button');
+                deleteBtn.type = 'button';
+                deleteBtn.textContent = '삭제';
+                deleteBtn.addEventListener('click', () => handleAppleDelete(item));
+                actionsTd.appendChild(editBtn);
+                actionsTd.appendChild(deleteBtn);
+                tr.appendChild(actionsTd);
+                appleTableBody.appendChild(tr);
+            });
+        }
+
+        async function loadApplePriceTiers(territory = 'KOR', options = {}) {
+            if (!applePriceTierSelect) return;
+            const normalized = (territory || 'KOR').trim().toUpperCase();
+            if (!options.force && appleState.priceTiersTerritory === normalized && appleState.priceTiers.length) {
+                populateApplePriceTierOptions(appleState.priceTiers);
+                return;
+            }
+            applePriceTierSelect.innerHTML = '<option value="">티어 선택 안 함</option>';
+            try {
+                const res = await fetch(`/api/apple/pricing/tiers?territory=${encodeURIComponent(normalized)}`);
+                if (!res.ok) {
+                    throw new Error('가격 티어를 불러오지 못했습니다.');
+                }
+                const data = await res.json();
+                const tiers = data.tiers || [];
+                appleState.priceTiersTerritory = normalized;
+                appleState.priceTiers = tiers;
+                populateApplePriceTierOptions(tiers);
+            } catch (error) {
+                if (!options.quiet && appleFormStatus) {
+                    appleFormStatus.textContent = error.message;
+                }
+            }
+        }
+
+        async function fetchAppleList(options = {}) {
+            if (appleLoadingEl) appleLoadingEl.hidden = false;
+            if (appleLoadingBar) appleLoadingBar.style.width = '40%';
+            if (appleStatusEl) appleStatusEl.textContent = 'Apple 인앱 상품을 불러오는 중입니다...';
+            const refresh = Boolean(options.refresh);
+            const items = [];
+            let token;
+            try {
+                do {
+                    const params = new URLSearchParams();
+                    params.set('page_size', '200');
+                    if (token) params.set('token', token);
+                    if (refresh && !token) params.set('refresh', 'true');
+                    const res = await fetch(`/api/apple/inapp/list?${params.toString()}`);
+                    if (!res.ok) {
+                        const err = await res.json().catch(() => ({}));
+                        const detail = Array.isArray(err.detail)
+                            ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                            : err.detail || err.message;
+                        throw new Error(detail || 'Apple 인앱 상품을 불러오지 못했습니다.');
+                    }
+                    const data = await res.json();
+                    items.push(...(data.items || []));
+                    token = data.nextPageToken || null;
+                } while (token);
+                appleState.items = items;
+                renderAppleTable(items);
+                if (appleStatusEl) {
+                    appleStatusEl.textContent = `총 ${items.length}개의 Apple 인앱 상품을 불러왔습니다.`;
+                }
+            } catch (error) {
+                appleState.items = [];
+                renderAppleTable([]);
+                if (appleStatusEl) {
+                    appleStatusEl.textContent = error.message;
+                }
+            } finally {
+                if (appleLoadingBar) {
+                    appleLoadingBar.style.width = '100%';
+                    setTimeout(() => {
+                        if (appleLoadingEl) appleLoadingEl.hidden = true;
+                        if (appleLoadingBar) appleLoadingBar.style.width = '0%';
+                    }, 400);
+                } else if (appleLoadingEl) {
+                    appleLoadingEl.hidden = true;
+                }
+            }
+        }
+
+        function renderAppleImportPreview(data) {
+            if (!appleImportPreviewEl) return;
+            appleImportPreviewEl.innerHTML = '';
+            const operations = data?.operations || [];
+            if (!operations.length) {
+                const message = document.createElement('p');
+                message.className = 'hint';
+                message.textContent = '적용할 변경 사항이 없습니다.';
+                appleImportPreviewEl.appendChild(message);
+                return;
+            }
+            const list = document.createElement('ul');
+            list.className = 'operation-list';
+            operations.forEach((op) => {
+                const item = document.createElement('li');
+                item.className = `operation-${op.action}`;
+                const header = document.createElement('div');
+                header.className = 'operation-header';
+                const strong = document.createElement('strong');
+                strong.textContent = op.product_id || op.productId || '';
+                header.appendChild(strong);
+                header.appendChild(document.createTextNode(` - ${op.action}`));
+                item.appendChild(header);
+                if (op.data) {
+                    const details = document.createElement('div');
+                    details.className = 'operation-details';
+                    const refName = op.data.reference_name || op.data.referenceName || '';
+                    details.textContent = `참조 이름: ${refName}`;
+                    item.appendChild(details);
+                }
+                list.appendChild(item);
+            });
+            appleImportPreviewEl.appendChild(list);
+        }
+
+        async function handleAppleExport() {
+            try {
+                if (appleStatusEl) appleStatusEl.textContent = 'CSV를 준비하는 중입니다...';
+                const res = await fetch('/api/apple/inapp/export');
+                if (!res.ok) {
+                    throw new Error('CSV 내보내기에 실패했습니다.');
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'apple-iap-products.csv';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+                if (appleStatusEl) appleStatusEl.textContent = 'CSV 파일을 다운로드했습니다.';
+            } catch (error) {
+                if (appleStatusEl) appleStatusEl.textContent = error.message;
+            }
+        }
+
+        async function handleAppleImportPreview() {
+            if (!appleImportFileInput || !appleImportFileInput.files?.length) {
+                if (appleStatusEl) appleStatusEl.textContent = 'CSV 파일을 선택해주세요.';
+                return;
+            }
+            appleImportPreviewBtn.disabled = true;
+            appleImportApplyBtn.disabled = true;
+            if (appleStatusEl) appleStatusEl.textContent = 'CSV를 분석하는 중입니다...';
+            const formData = new FormData();
+            formData.append('file', appleImportFileInput.files[0]);
+            try {
+                const res = await fetch('/api/apple/inapp/import/preview', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail || err.message;
+                    throw new Error(detail || '미리보기에 실패했습니다.');
+                }
+                const data = await res.json();
+                appleImportPreviewData = { operations: data.operations || [] };
+                renderAppleImportPreview(data);
+                appleImportApplyBtn.disabled = !(data.operations && data.operations.length);
+                if (appleStatusEl) {
+                    appleStatusEl.textContent = data.operations?.length
+                        ? '변경 내역을 확인한 뒤 적용 버튼을 눌러주세요.'
+                        : '적용할 변경 사항이 없습니다.';
+                }
+            } catch (error) {
+                appleImportPreviewData = null;
+                renderAppleImportPreview({ operations: [] });
+                if (appleStatusEl) appleStatusEl.textContent = error.message;
+            } finally {
+                appleImportPreviewBtn.disabled = false;
+            }
+        }
+
+        async function handleAppleImportApply() {
+            if (!appleImportPreviewData?.operations?.length) {
+                if (appleStatusEl) appleStatusEl.textContent = '적용할 변경 사항이 없습니다.';
+                return;
+            }
+            appleImportApplyBtn.disabled = true;
+            if (appleStatusEl) appleStatusEl.textContent = 'CSV 변경 사항을 적용하는 중입니다...';
+            try {
+                const res = await fetch('/api/apple/inapp/import/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ operations: appleImportPreviewData.operations }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail || err.message;
+                    throw new Error(detail || 'CSV 적용에 실패했습니다.');
+                }
+                appleImportPreviewData = null;
+                renderAppleImportPreview({ operations: [] });
+                if (appleImportFileInput) appleImportFileInput.value = '';
+                if (appleStatusEl) appleStatusEl.textContent = 'CSV 변경 사항을 적용했습니다.';
+                fetchAppleList({ refresh: true });
+            } catch (error) {
+                if (appleStatusEl) appleStatusEl.textContent = error.message;
+                appleImportApplyBtn.disabled = false;
+            }
+        }
+
+        function openAppleEditor(item) {
+            if (!appleForm) return;
+            const productId = item.productId || item.sku || '';
+            appleForm.dataset.mode = 'edit';
+            appleForm.dataset.productId = productId;
+            if (appleProductIdInput) {
+                appleProductIdInput.value = productId;
+                appleProductIdInput.readOnly = true;
+            }
+            if (appleReferenceNameInput) appleReferenceNameInput.value = item.referenceName || '';
+            if (applePurchaseTypeSelect) {
+                applePurchaseTypeSelect.disabled = true;
+                const normalized = (item.type || '').toLowerCase();
+                const option = Array.from(applePurchaseTypeSelect.options).find((opt) => opt.value.toLowerCase() === normalized);
+                applePurchaseTypeSelect.value = option ? option.value : applePurchaseTypeSelect.options[0]?.value || 'consumable';
+            }
+            const prices = Array.isArray(item.prices) ? item.prices : [];
+            if (applePriceTierSelect) {
+                const tier = prices.length ? prices[0].priceTier || '' : '';
+                applePriceTierSelect.value = tier || '';
+            }
+            if (appleBaseTerritoryInput) {
+                const territory = prices.length ? prices[0].territory || 'KOR' : 'KOR';
+                appleBaseTerritoryInput.value = territory;
+            }
+            if (appleClearedForSaleCheckbox) appleClearedForSaleCheckbox.checked = Boolean(item.clearedForSale);
+            if (appleFamilySharableCheckbox) appleFamilySharableCheckbox.checked = Boolean(item.familySharable);
+            if (appleReviewNoteInput) appleReviewNoteInput.value = '';
+            if (appleLocalizationContainer) {
+                appleLocalizationContainer.innerHTML = '';
+                const localizations = item.localizations || {};
+                const entries = Object.entries(localizations);
+                if (entries.length) {
+                    entries.forEach(([locale, value]) => {
+                        addAppleLocalization(locale, value?.name || '', value?.description || '');
+                    });
+                } else {
+                    addAppleLocalization('ko-KR');
+                }
+            }
+            if (appleFormStatus) appleFormStatus.textContent = '';
+            if (appleSubmitBtn) appleSubmitBtn.textContent = '저장';
+            if (applePriceTierSelect && appleState.priceTiersTerritory !== (appleBaseTerritoryInput?.value || 'KOR')) {
+                loadApplePriceTiers(appleBaseTerritoryInput?.value || 'KOR', { force: true });
+            }
+        }
+
+        async function handleAppleDelete(item) {
+            const productId = item.productId || item.sku;
+            if (!productId) return;
+            const confirmed = window.confirm(`'${productId}' 상품을 삭제하시겠습니까?`);
+            if (!confirmed) return;
+            try {
+                const res = await fetch(`/api/apple/inapp/${encodeURIComponent(productId)}`, { method: 'DELETE' });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail || err.message;
+                    throw new Error(detail || '상품 삭제에 실패했습니다.');
+                }
+                if (appleStatusEl) appleStatusEl.textContent = '상품을 삭제했습니다.';
+                if (appleForm && appleForm.dataset.productId === productId) {
+                    resetAppleForm();
+                }
+                fetchAppleList({ refresh: true });
+            } catch (error) {
+                if (appleStatusEl) appleStatusEl.textContent = error.message;
+            }
+        }
+
+        async function handleAppleSubmit(event) {
+            if (event) {
+                event.preventDefault();
+            }
+            if (!appleForm) return;
+            const mode = appleForm.dataset.mode || 'create';
+            const productId = (appleProductIdInput?.value || '').trim();
+            const referenceName = (appleReferenceNameInput?.value || '').trim();
+            if (!productId) {
+                if (appleFormStatus) appleFormStatus.textContent = '상품 ID를 입력해주세요.';
+                return;
+            }
+            if (!referenceName) {
+                if (appleFormStatus) appleFormStatus.textContent = '참조 이름을 입력해주세요.';
+                return;
+            }
+            const localizations = gatherAppleLocalizations();
+            if (!localizations.length) {
+                if (appleFormStatus) appleFormStatus.textContent = '최소 1개의 현지화를 입력해주세요.';
+                return;
+            }
+            const basePayload = {
+                reference_name: referenceName,
+                cleared_for_sale: Boolean(appleClearedForSaleCheckbox?.checked),
+                family_sharable: Boolean(appleFamilySharableCheckbox?.checked),
+                review_note: (appleReviewNoteInput?.value || '').trim() || null,
+                price_tier: (applePriceTierSelect?.value || '').trim() || null,
+                base_territory: (appleBaseTerritoryInput?.value || 'KOR').trim().toUpperCase(),
+                localizations,
+            };
+            let endpoint = '/api/apple/inapp/create';
+            let method = 'POST';
+            let payload = {
+                product_id: productId,
+                reference_name: referenceName,
+                purchase_type: applePurchaseTypeSelect?.value || 'consumable',
+                cleared_for_sale: basePayload.cleared_for_sale,
+                family_sharable: basePayload.family_sharable,
+                review_note: basePayload.review_note,
+                price_tier: basePayload.price_tier,
+                base_territory: basePayload.base_territory,
+                localizations,
+            };
+            if (mode === 'edit') {
+                endpoint = `/api/apple/inapp/${encodeURIComponent(productId)}`;
+                method = 'PUT';
+                payload = basePayload;
+            } else if (!payload.purchase_type) {
+                if (appleFormStatus) appleFormStatus.textContent = '인앱 상품 타입을 선택해주세요.';
+                return;
+            }
+            if (appleSubmitBtn) {
+                appleSubmitBtn.disabled = true;
+                appleSubmitBtn.textContent = '저장 중...';
+            }
+            if (appleFormStatus) {
+                appleFormStatus.textContent = mode === 'edit' ? '상품을 수정하는 중입니다...' : '상품을 생성하는 중입니다...';
+            }
+            try {
+                const res = await fetch(endpoint, {
+                    method,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail || err.message;
+                    throw new Error(detail || '요청이 실패했습니다.');
+                }
+                if (appleFormStatus) appleFormStatus.textContent = '저장되었습니다.';
+                resetAppleForm();
+                fetchAppleList({ refresh: true });
+            } catch (error) {
+                if (appleFormStatus) appleFormStatus.textContent = error.message;
+            } finally {
+                if (appleSubmitBtn) {
+                    appleSubmitBtn.disabled = false;
+                    appleSubmitBtn.textContent = '저장';
+                }
+            }
+        }
+
+        function ensureAppleInitialized() {
+            if (appleState.initialized) {
+                return;
+            }
+            appleState.initialized = true;
+            resetAppleForm();
+            loadApplePriceTiers(appleBaseTerritoryInput?.value || 'KOR', { quiet: true });
+            fetchAppleList({ refresh: true });
+        }
+
+        appleRefreshBtn?.addEventListener('click', () => fetchAppleList({ refresh: true }));
+        appleExportBtn?.addEventListener('click', handleAppleExport);
+        appleImportPreviewBtn?.addEventListener('click', handleAppleImportPreview);
+        appleImportApplyBtn?.addEventListener('click', handleAppleImportApply);
+        appleAddLocaleBtn?.addEventListener('click', () => addAppleLocalization());
+        appleForm?.addEventListener('submit', handleAppleSubmit);
+        appleResetBtn?.addEventListener('click', () => {
+            setTimeout(() => resetAppleForm(), 0);
+        });
+        appleBaseTerritoryInput?.addEventListener('change', () => {
+            const territory = (appleBaseTerritoryInput.value || 'KOR').trim();
+            loadApplePriceTiers(territory);
+        });
+
+        storeToggleButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const targetStore = button.dataset.store;
+                if (targetStore) {
+                    setActiveStore(targetStore);
+                }
+            });
         });
 
         exportBtn?.addEventListener('click', handleExportCsv);
@@ -2146,6 +2981,7 @@
         renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, newImportPreviewEl);
         renderTemplateDetails(null);
         updateIndexHeaderIndicator();
+        setActiveStore(activeStore);
         initializeApp();
     </script>
 </body>
