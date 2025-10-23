@@ -11,9 +11,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from dotenv import load_dotenv
 
+from apple_store import (
+    create_inapp_purchase as create_apple_inapp_purchase,
+    delete_inapp_purchase as delete_apple_inapp_purchase,
+    get_all_inapp_purchases,
+    list_price_tiers as list_apple_price_tiers,
+    update_inapp_purchase as update_apple_inapp_purchase,
+)
 from google_play import (
     create_managed_inapp,
     delete_inapp_product,
+    get_all_inapp_products,
     update_managed_inapp,
 )
 from price_templates import (
@@ -41,7 +49,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="iap-manager")
+GOOGLE_STORE = "google"
+APPLE_STORE = "apple"
+
+app = FastAPI(title="iap-management-tool")
 
 app.add_middleware(
     CORSMiddleware,
@@ -156,6 +167,74 @@ class BulkCreateApplyRequest(BaseModel):
     operations: List[BulkCreateOperation]
 
 
+class AppleLocalization(BaseModel):
+    locale: str = Field(..., min_length=2)
+    name: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+
+
+class AppleCreateInAppRequest(BaseModel):
+    product_id: str = Field(..., min_length=1)
+    reference_name: str = Field(..., min_length=1)
+    purchase_type: Literal[
+        "consumable",
+        "nonConsumable",
+        "nonRenewingSubscription",
+        "autoRenewableSubscription",
+    ]
+    cleared_for_sale: bool = Field(default=True)
+    family_sharable: bool = Field(default=False)
+    review_note: Optional[str] = Field(default=None, max_length=4000)
+    price_tier: Optional[str] = Field(default=None, min_length=1)
+    base_territory: str = Field(default="KOR", min_length=2)
+    localizations: List[AppleLocalization] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def ensure_localizations(cls, model: "AppleCreateInAppRequest"):
+        if not model.localizations:
+            raise ValueError("최소 1개의 현지화 정보를 입력해야 합니다.")
+        return model
+
+
+class AppleUpdateInAppRequest(BaseModel):
+    reference_name: Optional[str] = Field(default=None, min_length=1)
+    cleared_for_sale: Optional[bool] = None
+    family_sharable: Optional[bool] = None
+    review_note: Optional[str] = Field(default=None, max_length=4000)
+    price_tier: Optional[str] = Field(default=None, min_length=1)
+    base_territory: str = Field(default="KOR", min_length=2)
+    localizations: List[AppleLocalization] = Field(default_factory=list)
+
+
+class AppleImportPayload(BaseModel):
+    product_id: str = Field(..., min_length=1)
+    reference_name: str = Field(..., min_length=1)
+    purchase_type: Optional[
+        Literal[
+            "consumable",
+            "nonConsumable",
+            "nonRenewingSubscription",
+            "autoRenewableSubscription",
+        ]
+    ] = None
+    cleared_for_sale: bool = Field(default=True)
+    family_sharable: bool = Field(default=False)
+    review_note: Optional[str] = Field(default=None, max_length=4000)
+    price_tier: Optional[str] = Field(default=None, min_length=1)
+    base_territory: str = Field(default="KOR", min_length=2)
+    localizations: List[AppleLocalization] = Field(default_factory=list)
+
+
+class AppleImportOperation(BaseModel):
+    action: Literal["create", "update", "delete"]
+    product_id: str = Field(..., min_length=1)
+    data: Optional[AppleImportPayload] = None
+
+
+class AppleImportApplyRequest(BaseModel):
+    operations: List[AppleImportOperation]
+
+
 def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List[str]:
     languages: set[str] = set()
     for item in products:
@@ -166,7 +245,7 @@ def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List
     return sorted(languages)
 
 
-def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
+def _canonicalize_google_product(item: Dict[str, Any]) -> Dict[str, Any]:
     listings = item.get("listings") or {}
     normalized_listings: Dict[str, Dict[str, str]] = {}
     for language, listing in listings.items():
@@ -207,6 +286,35 @@ def _canonicalize_product(item: Dict[str, Any]) -> Dict[str, Any]:
         "listings": normalized_listings,
         "prices": normalized_prices or None,
     }
+
+
+def _fetch_google_products() -> List[Dict[str, Any]]:
+    return get_all_inapp_products()
+
+
+def _fetch_apple_products() -> List[Dict[str, Any]]:
+    return get_all_inapp_purchases()
+
+
+def _collect_locales_from_apple_products(products: Iterable[Dict[str, Any]]) -> List[str]:
+    locales: set[str] = set()
+    for product in products:
+        localization_map = product.get("localizations") or {}
+        for locale in localization_map.keys():
+            if isinstance(locale, str) and locale:
+                locales.add(locale)
+    return sorted(locales)
+
+
+def _parse_bool_cell(value: str, *, default: bool = False) -> bool:
+    text = (value or "").strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "t"}:
+        return True
+    if text in {"0", "false", "no", "n", "f"}:
+        return False
+    raise ValueError("불리언 필드에는 true/false 값을 입력해주세요.")
 
 
 def _normalize_price_won(value: str) -> tuple[str, str]:
@@ -326,6 +434,32 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
         rows.append(entry)
 
     return rows, languages
+
+
+def _parse_apple_import_csv(content: bytes) -> tuple[List[Dict[str, str]], List[str]]:
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV 파일은 UTF-8 인코딩이어야 합니다.") from exc
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
+
+    locales: set[str] = set()
+    for name in reader.fieldnames:
+        if name.startswith("name_"):
+            locales.add(name.split("_", 1)[1])
+        if name.startswith("description_"):
+            locales.add(name.split("_", 1)[1])
+
+    rows: List[Dict[str, str]] = []
+    for index, row in enumerate(reader, start=2):
+        normalized = {key.strip(): (value or "").strip() for key, value in (row or {}).items()}
+        normalized["__row"] = str(index)
+        rows.append(normalized)
+
+    return rows, sorted(locale for locale in locales if locale)
 
 
 def _parse_bulk_create_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
@@ -595,7 +729,112 @@ def _build_import_operations(
 
     return {"operations": operations, "summary": summary}
 
-@app.get("/api/inapp/list")
+
+def _apple_row_to_payload(
+    row: Dict[str, str], locales: Iterable[str]
+) -> AppleImportPayload:
+    try:
+        cleared_for_sale = _parse_bool_cell(row.get("cleared_for_sale", ""), default=True)
+        family_sharable = _parse_bool_cell(row.get("family_sharable", ""), default=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"행 {row.get('__row')}: {exc}") from exc
+
+    base_territory = row.get("base_territory") or "KOR"
+    localizations: List[AppleLocalization] = []
+    for locale in locales:
+        name = row.get(f"name_{locale}") or ""
+        description = row.get(f"description_{locale}") or ""
+        if not name and not description:
+            continue
+        localizations.append(
+            AppleLocalization(locale=locale, name=name or "", description=description or "")
+        )
+
+    payload = AppleImportPayload(
+        product_id=(row.get("product_id") or "").strip(),
+        reference_name=(row.get("reference_name") or "").strip(),
+        purchase_type=(row.get("purchase_type") or "").strip() or None,
+        cleared_for_sale=cleared_for_sale,
+        family_sharable=family_sharable,
+        review_note=(row.get("review_note") or "").strip() or None,
+        price_tier=(row.get("price_tier") or "").strip() or None,
+        base_territory=base_territory,
+        localizations=localizations,
+    )
+    return payload
+
+
+def _build_apple_import_operations(
+    rows: List[Dict[str, str]], existing_products: Dict[str, Dict[str, Any]], locales: List[str]
+) -> Dict[str, Any]:
+    operations: List[Dict[str, Any]] = []
+    summary = {"create": 0, "update": 0, "delete": 0}
+
+    for row in rows:
+        row_number = row.get("__row", "?")
+        product_id = (row.get("product_id") or "").strip()
+        if not product_id:
+            raise HTTPException(status_code=400, detail=f"행 {row_number}: product_id가 필요합니다.")
+
+        action_text = (row.get("action") or "").strip().lower()
+        existing = existing_products.get(product_id)
+
+        if action_text == "delete":
+            operations.append(
+                {
+                    "action": "delete",
+                    "product_id": product_id,
+                    "current": existing,
+                }
+            )
+            summary["delete"] += 1
+            continue
+
+        payload = _apple_row_to_payload(row, locales)
+        if not payload.reference_name:
+            raise HTTPException(
+                status_code=400,
+                detail=f"행 {row_number}: reference_name 값을 입력해주세요.",
+            )
+        if not payload.localizations:
+            raise HTTPException(
+                status_code=400,
+                detail=f"행 {row_number}: 최소 1개의 로컬라이제이션이 필요합니다.",
+            )
+
+        if action_text == "create" or (action_text != "update" and product_id not in existing_products):
+            if payload.purchase_type is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"행 {row_number}: create 작업에는 purchase_type이 필요합니다.",
+                )
+            operations.append(
+                {
+                    "action": "create",
+                    "product_id": product_id,
+                    "data": payload.model_dump(),
+                }
+            )
+            summary["create"] += 1
+        else:
+            if existing is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"행 {row_number}: 업데이트 대상 상품을 찾을 수 없습니다.",
+                )
+            operations.append(
+                {
+                    "action": "update",
+                    "product_id": product_id,
+                    "data": payload.model_dump(),
+                    "current": existing,
+                }
+            )
+            summary["update"] += 1
+
+    return {"operations": operations, "summary": summary}
+
+@app.get("/api/google/inapp/list")
 async def api_list_inapp(
     token: str | None = Query(default=None),
     refresh: bool = Query(default=False),
@@ -603,8 +842,13 @@ async def api_list_inapp(
 ):
     try:
         if refresh:
-            refresh_products_from_remote()
-        items, next_token = get_paginated_products(token, page_size=page_size)
+            refresh_products_from_remote(GOOGLE_STORE, _fetch_google_products)
+        items, next_token = get_paginated_products(
+            GOOGLE_STORE,
+            _fetch_google_products,
+            token,
+            page_size=page_size,
+        )
         return {"items": items, "nextPageToken": next_token}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -613,10 +857,10 @@ async def api_list_inapp(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/inapp/export")
+@app.get("/api/google/inapp/export")
 async def api_export_inapp() -> StreamingResponse:
     try:
-        products = refresh_products_from_remote()
+        products = refresh_products_from_remote(GOOGLE_STORE, _fetch_google_products)
         languages = _collect_languages_from_products(products)
         output = io.StringIO()
         fieldnames = ["sku", "status", "default_language", "price_won"]
@@ -626,7 +870,7 @@ async def api_export_inapp() -> StreamingResponse:
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
         for item in products:
-            canonical = _canonicalize_product(item)
+            canonical = _canonicalize_google_product(item)
             default_price = canonical.get("default_price") or {}
             default_price_micros = default_price.get("priceMicros") or ""
             default_currency = default_price.get("currency") or ""
@@ -655,12 +899,12 @@ async def api_export_inapp() -> StreamingResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/inapp/new/template")
+@app.get("/api/google/inapp/new/template")
 async def api_bulk_create_template(
     row_count: int = Query(default=20, ge=1, le=500, description="템플릿에 포함할 행 수"),
 ) -> StreamingResponse:
     try:
-        products = get_cached_products()
+        products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
         languages = _collect_languages_from_products(products)
     except Exception as exc:
         logger.exception("Failed to prepare languages for bulk template", exc_info=exc)
@@ -685,10 +929,10 @@ async def api_bulk_create_template(
     return StreamingResponse(iter([csv_bytes]), media_type="text/csv", headers=headers)
 
 
-@app.get("/api/pricing/templates")
+@app.get("/api/google/pricing/templates")
 async def api_list_price_templates():
     try:
-        products = get_cached_products()
+        products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
         templates = generate_price_templates_from_products(products)
         return {"templates": [template.to_response() for template in templates]}
     except Exception as exc:
@@ -696,7 +940,7 @@ async def api_list_price_templates():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/inapp/new/import/preview")
+@app.post("/api/google/inapp/new/import/preview")
 async def api_bulk_create_preview(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
@@ -705,9 +949,11 @@ async def api_bulk_create_preview(file: UploadFile = File(...)):
     rows, csv_languages = _parse_bulk_create_csv(content)
 
     try:
-        existing_products_raw = refresh_products_from_remote()
+        existing_products_raw = refresh_products_from_remote(
+            GOOGLE_STORE, _fetch_google_products
+        )
         existing_products = {
-            item.get("sku"): _canonicalize_product(item)
+            item.get("sku"): _canonicalize_google_product(item)
             for item in existing_products_raw
             if item.get("sku")
         }
@@ -728,12 +974,12 @@ async def api_bulk_create_preview(file: UploadFile = File(...)):
     }
 
 
-@app.post("/api/inapp/create")
+@app.post("/api/google/inapp/create")
 async def api_create_inapp(payload: CreateInAppRequest):
     try:
         regional_pricing = None
         if payload.price_template_id:
-            products = get_cached_products()
+            products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
             templates = generate_price_templates_from_products(products)
             template = get_template_by_id(templates, payload.price_template_id)
             if not template:
@@ -746,7 +992,7 @@ async def api_create_inapp(payload: CreateInAppRequest):
             regional_pricing=regional_pricing,
             translations=[t.dict() for t in payload.translations],
         )
-        upsert_cached_product(created)
+        upsert_cached_product(GOOGLE_STORE, created)
         return created
     except HTTPException:
         raise
@@ -755,12 +1001,12 @@ async def api_create_inapp(payload: CreateInAppRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/inapp/new/import/apply")
+@app.post("/api/google/inapp/new/import/apply")
 async def api_bulk_create_apply(request: BulkCreateApplyRequest):
     results = {"create": 0}
 
     try:
-        existing_products = get_cached_products()
+        existing_products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
         existing_skus = {item.get("sku") for item in existing_products if item.get("sku")}
 
         for op in request.operations:
@@ -780,7 +1026,7 @@ async def api_bulk_create_apply(request: BulkCreateApplyRequest):
                 prices=data.prices,
                 status=data.status,
             )
-            upsert_cached_product(created)
+            upsert_cached_product(GOOGLE_STORE, created)
             existing_skus.add(data.sku)
             results["create"] += 1
     except HTTPException:
@@ -794,7 +1040,7 @@ async def api_bulk_create_apply(request: BulkCreateApplyRequest):
     return {"status": "ok", "summary": results}
 
 
-@app.put("/api/inapp/{sku}")
+@app.put("/api/google/inapp/{sku}")
 async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
     try:
         listings_payload = {
@@ -814,7 +1060,7 @@ async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
             listings=listings_payload,
             prices=prices_payload,
         )
-        upsert_cached_product(updated)
+        upsert_cached_product(GOOGLE_STORE, updated)
         return {"status": "ok"}
     except HTTPException:
         raise
@@ -825,18 +1071,18 @@ async def api_update_inapp(sku: str, payload: UpdateInAppRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.delete("/api/inapp/{sku}")
+@app.delete("/api/google/inapp/{sku}")
 async def api_delete_inapp(sku: str):
     try:
         delete_inapp_product(sku=sku)
-        delete_cached_product(sku)
+        delete_cached_product(GOOGLE_STORE, sku)
         return {"status": "ok"}
     except Exception as exc:
         logger.exception("Failed to delete in-app product")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/inapp/import/preview")
+@app.post("/api/google/inapp/import/preview")
 async def api_import_preview(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
@@ -845,9 +1091,11 @@ async def api_import_preview(file: UploadFile = File(...)):
     rows, csv_languages = _parse_import_csv(content)
 
     try:
-        existing_products_raw = refresh_products_from_remote()
+        existing_products_raw = refresh_products_from_remote(
+            GOOGLE_STORE, _fetch_google_products
+        )
         existing_products = {
-            item.get("sku"): _canonicalize_product(item)
+            item.get("sku"): _canonicalize_google_product(item)
             for item in existing_products_raw
             if item.get("sku")
         }
@@ -872,7 +1120,7 @@ async def api_import_preview(file: UploadFile = File(...)):
     }
 
 
-@app.post("/api/inapp/import/apply")
+@app.post("/api/google/inapp/import/apply")
 async def api_import_apply(request: ImportApplyRequest):
     results = {"create": 0, "update": 0, "delete": 0}
 
@@ -894,7 +1142,7 @@ async def api_import_apply(request: ImportApplyRequest):
                     prices=data.prices,
                     status=data.status,
                 )
-                upsert_cached_product(created)
+                upsert_cached_product(GOOGLE_STORE, created)
                 results["create"] += 1
             elif op.action == "update":
                 if not op.data:
@@ -912,11 +1160,11 @@ async def api_import_apply(request: ImportApplyRequest):
                     listings=listings_payload,
                     prices=data.prices,
                 )
-                upsert_cached_product(updated)
+                upsert_cached_product(GOOGLE_STORE, updated)
                 results["update"] += 1
             elif op.action == "delete":
                 delete_inapp_product(sku=op.sku)
-                delete_cached_product(op.sku)
+                delete_cached_product(GOOGLE_STORE, op.sku)
                 results["delete"] += 1
             else:  # pragma: no cover - defensive
                 raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
@@ -929,6 +1177,285 @@ async def api_import_apply(request: ImportApplyRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {"status": "ok", "summary": results}
+
+
+@app.get("/api/apple/inapp/list")
+async def api_apple_list_inapp(
+    token: str | None = Query(default=None),
+    refresh: bool = Query(default=False),
+    page_size: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=200),
+):
+    try:
+        if refresh:
+            refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+        items, next_token = get_paginated_products(
+            APPLE_STORE, _fetch_apple_products, token, page_size=page_size
+        )
+        return {"items": items, "nextPageToken": next_token}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to list Apple in-app purchases")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/apple/inapp/export")
+async def api_apple_export_inapp() -> StreamingResponse:
+    try:
+        products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+        locales = _collect_locales_from_apple_products(products)
+
+        fieldnames = [
+            "product_id",
+            "reference_name",
+            "type",
+            "state",
+            "cleared_for_sale",
+            "family_sharable",
+            "price_tier",
+            "base_territory",
+            "review_note",
+        ]
+        for locale in locales:
+            fieldnames.append(f"name_{locale}")
+            fieldnames.append(f"description_{locale}")
+
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in products:
+            localizations = item.get("localizations") or {}
+            row = {
+                "product_id": item.get("productId") or item.get("sku") or "",
+                "reference_name": item.get("referenceName", ""),
+                "type": item.get("type", ""),
+                "state": item.get("state", ""),
+                "cleared_for_sale": "yes" if item.get("clearedForSale") else "no",
+                "family_sharable": "yes" if item.get("familySharable") else "no",
+                "price_tier": (item.get("prices") or [{}])[0].get("priceTier") if item.get("prices") else "",
+                "base_territory": (item.get("prices") or [{}])[0].get("territory", "KOR"),
+                "review_note": "",
+            }
+            for locale in locales:
+                loc = localizations.get(locale) or {}
+                row[f"name_{locale}"] = loc.get("name", "")
+                row[f"description_{locale}"] = loc.get("description", "")
+            writer.writerow(row)
+
+        csv_bytes = output.getvalue().encode("utf-8-sig")
+        headers = {"Content-Disposition": 'attachment; filename="apple-iap-products.csv"'}
+        return StreamingResponse(iter([csv_bytes]), media_type="text/csv", headers=headers)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to export Apple in-app purchases")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/apple/pricing/tiers")
+async def api_apple_price_tiers(territory: str = Query(default="KOR", min_length=2)):
+    try:
+        tiers = list_apple_price_tiers(territory)
+        return {"tiers": tiers}
+    except Exception as exc:
+        logger.exception("Failed to load Apple price tiers")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/apple/inapp/create")
+async def api_apple_create_inapp(payload: AppleCreateInAppRequest):
+    try:
+        result = create_apple_inapp_purchase(
+            product_id=payload.product_id,
+            reference_name=payload.reference_name,
+            purchase_type=payload.purchase_type,
+            cleared_for_sale=payload.cleared_for_sale,
+            family_sharable=payload.family_sharable,
+            review_note=payload.review_note,
+            price_tier=payload.price_tier,
+            base_territory=payload.base_territory,
+            localizations=[loc.model_dump() for loc in payload.localizations],
+        )
+        upsert_cached_product(APPLE_STORE, result)
+        return {"status": "ok", "item": result}
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("Failed to create Apple in-app purchase")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _find_apple_inapp(product_id: str) -> Dict[str, Any]:
+    products = get_cached_products(APPLE_STORE, _fetch_apple_products)
+    for item in products:
+        candidate = item.get("productId") or item.get("sku")
+        if candidate == product_id:
+            return item
+    products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+    for item in products:
+        candidate = item.get("productId") or item.get("sku")
+        if candidate == product_id:
+            return item
+    raise HTTPException(status_code=404, detail="해당 Apple 인앱 상품을 찾을 수 없습니다.")
+
+
+@app.put("/api/apple/inapp/{product_id}")
+async def api_apple_update_inapp(product_id: str, payload: AppleUpdateInAppRequest):
+    try:
+        target = _find_apple_inapp(product_id)
+        inapp_id = target.get("id")
+        if not inapp_id:
+            raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
+
+        localizations = payload.localizations or [
+            AppleLocalization(locale=locale, name=data.get("name", ""), description=data.get("description", ""))
+            for locale, data in (target.get("localizations") or {}).items()
+        ]
+
+        result = update_apple_inapp_purchase(
+            inapp_id=inapp_id,
+            reference_name=payload.reference_name,
+            cleared_for_sale=payload.cleared_for_sale,
+            family_sharable=payload.family_sharable,
+            review_note=payload.review_note,
+            price_tier=payload.price_tier,
+            base_territory=payload.base_territory,
+            localizations=[loc.model_dump() for loc in localizations],
+        )
+        upsert_cached_product(APPLE_STORE, result)
+        return {"status": "ok", "item": result}
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("Failed to update Apple in-app purchase")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.delete("/api/apple/inapp/{product_id}")
+async def api_apple_delete_inapp(product_id: str):
+    try:
+        target = _find_apple_inapp(product_id)
+        inapp_id = target.get("id")
+        if not inapp_id:
+            raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
+        delete_apple_inapp_purchase(inapp_id)
+        delete_cached_product(APPLE_STORE, product_id)
+        return {"status": "ok"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to delete Apple in-app purchase")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/apple/inapp/import/preview")
+async def api_apple_import_preview(file: UploadFile = File(...)):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
+
+    rows, locales = _parse_apple_import_csv(content)
+
+    try:
+        existing_products_raw = refresh_products_from_remote(
+            APPLE_STORE, _fetch_apple_products
+        )
+        existing_products = {
+            (item.get("productId") or item.get("sku")): item
+            for item in existing_products_raw
+            if item.get("productId") or item.get("sku")
+        }
+    except Exception as exc:
+        logger.exception("Failed to load Apple in-app purchases for preview")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    operations_payload = _build_apple_import_operations(rows, existing_products, locales)
+
+    return {
+        "locales": locales,
+        "operations": operations_payload["operations"],
+        "summary": operations_payload["summary"],
+    }
+
+
+@app.post("/api/apple/inapp/import/apply")
+async def api_apple_import_apply(request: AppleImportApplyRequest):
+    summary = {"create": 0, "update": 0, "delete": 0}
+
+    try:
+        existing_list = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+        existing_map: Dict[str, Dict[str, Any]] = {
+            (item.get("productId") or item.get("sku")): item for item in existing_list if item.get("productId") or item.get("sku")
+        }
+
+        for op in request.operations:
+            product_id = op.product_id
+            if op.action == "create":
+                if not op.data or not op.data.purchase_type:
+                    raise HTTPException(status_code=400, detail="create 작업에는 data와 purchase_type이 필요합니다.")
+                created = create_apple_inapp_purchase(
+                    product_id=op.data.product_id,
+                    reference_name=op.data.reference_name,
+                    purchase_type=op.data.purchase_type,
+                    cleared_for_sale=op.data.cleared_for_sale,
+                    family_sharable=op.data.family_sharable,
+                    review_note=op.data.review_note,
+                    price_tier=op.data.price_tier,
+                    base_territory=op.data.base_territory,
+                    localizations=[loc.model_dump() for loc in op.data.localizations],
+                )
+                summary["create"] += 1
+                existing_map[product_id] = created
+                upsert_cached_product(APPLE_STORE, created)
+            elif op.action == "update":
+                if not op.data:
+                    raise HTTPException(status_code=400, detail="update 작업에는 data가 필요합니다.")
+                current = existing_map.get(product_id)
+                if not current:
+                    current = _find_apple_inapp(product_id)
+                    existing_map[product_id] = current
+                inapp_id = current.get("id")
+                if not inapp_id:
+                    raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
+                updated = update_apple_inapp_purchase(
+                    inapp_id=inapp_id,
+                    reference_name=op.data.reference_name,
+                    cleared_for_sale=op.data.cleared_for_sale,
+                    family_sharable=op.data.family_sharable,
+                    review_note=op.data.review_note,
+                    price_tier=op.data.price_tier,
+                    base_territory=op.data.base_territory,
+                    localizations=[loc.model_dump() for loc in op.data.localizations],
+                )
+                summary["update"] += 1
+                existing_map[product_id] = updated
+                upsert_cached_product(APPLE_STORE, updated)
+            elif op.action == "delete":
+                current = existing_map.get(product_id)
+                if not current:
+                    current = _find_apple_inapp(product_id)
+                inapp_id = current.get("id")
+                if not inapp_id:
+                    raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
+                delete_apple_inapp_purchase(inapp_id)
+                summary["delete"] += 1
+                existing_map.pop(product_id, None)
+                delete_cached_product(APPLE_STORE, product_id)
+            else:
+                raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("Failed to apply Apple import operations")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"status": "ok", "summary": summary}
 
 
 @app.get("/health")
