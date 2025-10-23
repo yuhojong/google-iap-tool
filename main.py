@@ -146,6 +146,16 @@ class ImportApplyRequest(BaseModel):
     operations: List[ImportOperation]
 
 
+class BulkCreateOperation(BaseModel):
+    action: Literal["create"] = Field(default="create")
+    sku: str
+    data: ImportProductPayload
+
+
+class BulkCreateApplyRequest(BaseModel):
+    operations: List[BulkCreateOperation]
+
+
 def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List[str]:
     languages: set[str] = set()
     for item in products:
@@ -316,6 +326,121 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
         rows.append(entry)
 
     return rows, languages
+
+
+def _parse_bulk_create_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV 파일은 UTF-8 인코딩이어야 합니다.") from exc
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
+
+    languages = sorted({name.split("title_", 1)[1] for name in reader.fieldnames if name.startswith("title_")})
+    rows: List[Dict[str, Any]] = []
+    seen_skus: set[str] = set()
+
+    for index, row in enumerate(reader, start=2):
+        sku = (row.get("sku") or "").strip()
+        default_language = (row.get("default_language") or "").strip()
+        price_won = (row.get("price_won") or "").strip()
+        status = (row.get("status") or "").strip() or None
+        row_index = (row.get("index") or "").strip() or None
+
+        if not sku and not default_language and not price_won:
+            continue
+
+        if not sku:
+            raise HTTPException(status_code=400, detail=f"{index} 행: sku 값을 입력해주세요.")
+        if sku in seen_skus:
+            raise HTTPException(status_code=400, detail=f"CSV에 중복된 SKU가 있습니다: {sku}")
+        seen_skus.add(sku)
+
+        listings: Dict[str, Dict[str, str]] = {}
+        for language in languages:
+            title_key = f"title_{language}"
+            description_key = f"description_{language}"
+            title = (row.get(title_key) or "").strip()
+            description = (row.get(description_key) or "").strip()
+            if title or description:
+                listings[language] = {"title": title, "description": description}
+
+        rows.append(
+            {
+                "row": index,
+                "index": row_index,
+                "sku": sku,
+                "status": status,
+                "default_language": default_language,
+                "price_won": price_won,
+                "listings": listings,
+            }
+        )
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="등록할 항목이 없습니다.")
+
+    return rows, languages
+
+
+def _build_bulk_create_operations(
+    rows: List[Dict[str, Any]],
+    existing_products: Dict[str, Dict[str, Any]],
+    templates_by_price_micros: Dict[str, PriceTemplate] | None = None,
+) -> Dict[str, Any]:
+    templates_by_price_micros = templates_by_price_micros or {}
+    operations: List[Dict[str, Any]] = []
+    summary = {"create": 0}
+
+    existing_skus = {sku for sku, data in existing_products.items() if sku}
+
+    for entry in rows:
+        sku = entry["sku"]
+        if sku in existing_skus:
+            raise HTTPException(status_code=400, detail=f"{sku} 는 이미 등록된 상품입니다.")
+
+        default_language = entry["default_language"] or ""
+        if not default_language:
+            raise HTTPException(status_code=400, detail=f"{sku} 행: default_language 값을 입력해주세요.")
+
+        price_won_value = entry["price_won"] or ""
+        if not price_won_value:
+            raise HTTPException(status_code=400, detail=f"{sku} 행: price_won 값을 입력해주세요.")
+
+        try:
+            price_micros, _ = _normalize_price_won(price_won_value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{sku} 행: {exc}") from exc
+
+        listings = entry["listings"] or {}
+        default_listing = listings.get(default_language)
+        if not default_listing or not default_listing.get("title") or not default_listing.get("description"):
+            raise HTTPException(status_code=400, detail=f"{sku} 행: 기본 언어 번역 제목과 설명이 필요합니다.")
+
+        template = templates_by_price_micros.get(price_micros)
+        regional_prices = None
+        if template:
+            pricing_payload = template.to_pricing_payload()
+            regional_prices = pricing_payload.get("prices")
+
+        new_product = {
+            "sku": sku,
+            "status": entry.get("status") or "active",
+            "default_language": default_language,
+            "default_price": {
+                "priceMicros": price_micros,
+                "currency": "KRW",
+            },
+            "listings": listings,
+            "prices": regional_prices,
+        }
+
+        operations.append({"action": "create", "sku": sku, "data": new_product, "index": entry.get("index")})
+        summary["create"] += 1
+
+    return {"operations": operations, "summary": summary}
 
 
 def _build_import_operations(
@@ -530,6 +655,36 @@ async def api_export_inapp() -> StreamingResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/inapp/new/template")
+async def api_bulk_create_template(
+    row_count: int = Query(default=20, ge=1, le=500, description="템플릿에 포함할 행 수"),
+) -> StreamingResponse:
+    try:
+        products = get_cached_products()
+        languages = _collect_languages_from_products(products)
+    except Exception as exc:
+        logger.exception("Failed to prepare languages for bulk template", exc_info=exc)
+        languages = []
+
+    if not languages:
+        languages = ["ko-KR"]
+
+    fieldnames = ["index", "sku", "status", "default_language", "price_won"]
+    for language in languages:
+        fieldnames.append(f"title_{language}")
+        fieldnames.append(f"description_{language}")
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for idx in range(1, row_count + 1):
+        writer.writerow({"index": idx})
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    headers = {"Content-Disposition": 'attachment; filename="iap-new-products-template.csv"'}
+    return StreamingResponse(iter([csv_bytes]), media_type="text/csv", headers=headers)
+
+
 @app.get("/api/pricing/templates")
 async def api_list_price_templates():
     try:
@@ -539,6 +694,38 @@ async def api_list_price_templates():
     except Exception as exc:
         logger.exception("Failed to load price templates")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/inapp/new/import/preview")
+async def api_bulk_create_preview(file: UploadFile = File(...)):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
+
+    rows, csv_languages = _parse_bulk_create_csv(content)
+
+    try:
+        existing_products_raw = refresh_products_from_remote()
+        existing_products = {
+            item.get("sku"): _canonicalize_product(item)
+            for item in existing_products_raw
+            if item.get("sku")
+        }
+        templates = generate_price_templates_from_products(existing_products_raw)
+        templates_by_price = index_templates_by_price_micros(templates)
+    except Exception as exc:
+        logger.exception("Failed to prepare bulk create preview")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    operations_payload = _build_bulk_create_operations(rows, existing_products, templates_by_price)
+
+    languages = sorted(set(csv_languages))
+
+    return {
+        "languages": languages,
+        "operations": operations_payload["operations"],
+        "summary": operations_payload["summary"],
+    }
 
 
 @app.post("/api/inapp/create")
@@ -566,6 +753,45 @@ async def api_create_inapp(payload: CreateInAppRequest):
     except Exception as exc:
         logger.exception("Failed to create managed in-app product")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/inapp/new/import/apply")
+async def api_bulk_create_apply(request: BulkCreateApplyRequest):
+    results = {"create": 0}
+
+    try:
+        existing_products = get_cached_products()
+        existing_skus = {item.get("sku") for item in existing_products if item.get("sku")}
+
+        for op in request.operations:
+            data = op.data
+            if data.sku in existing_skus:
+                raise HTTPException(status_code=400, detail=f"{data.sku} 는 이미 등록된 상품입니다.")
+
+            translations = [
+                {"language": language, "title": listing.title, "description": listing.description}
+                for language, listing in data.listings.items()
+            ]
+            created = create_managed_inapp(
+                sku=data.sku,
+                default_language=data.default_language,
+                translations=translations,
+                default_price=data.default_price.model_dump(),
+                prices=data.prices,
+                status=data.status,
+            )
+            upsert_cached_product(created)
+            existing_skus.add(data.sku)
+            results["create"] += 1
+    except HTTPException:
+        raise
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except Exception as exc:
+        logger.exception("Failed to apply bulk create operations")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"status": "ok", "summary": results}
 
 
 @app.put("/api/inapp/{sku}")
