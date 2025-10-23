@@ -19,26 +19,7 @@ def _get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS products (
-            store TEXT NOT NULL,
-            sku TEXT NOT NULL,
-            data TEXT NOT NULL,
-            hash TEXT NOT NULL,
-            updated_at REAL NOT NULL,
-            PRIMARY KEY (store, sku)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-        """
-    )
+    _ensure_schema(conn)
     return conn
 
 
@@ -49,6 +30,48 @@ def _serialize_product(product: Dict[str, Any]) -> str:
 def _hash_product(product: Dict[str, Any]) -> str:
     payload = _serialize_product(product)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+    table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='products'"
+    ).fetchone()
+    if not table_exists:
+        conn.execute(_PRODUCTS_TABLE_SQL)
+        return
+
+    columns = conn.execute("PRAGMA table_info(products)").fetchall()
+    column_names = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in columns}
+    required_columns = {"store", "sku", "data", "hash", "updated_at"}
+    missing_columns = required_columns - column_names
+    if missing_columns:
+        logger.warning(
+            "Detected legacy product cache schema missing columns %s; rebuilding cache table.",
+            sorted(missing_columns),
+        )
+        conn.execute("DROP TABLE products")
+        conn.execute(_PRODUCTS_TABLE_SQL)
+
+
+_PRODUCTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS products (
+    store TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    data TEXT NOT NULL,
+    hash TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (store, sku)
+)
+"""
 
 
 def _update_last_sync(conn: sqlite3.Connection, store: str, timestamp: float) -> None:
