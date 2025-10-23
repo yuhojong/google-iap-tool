@@ -5,9 +5,7 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
-
-from google_play import get_all_inapp_products
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +22,12 @@ def _get_connection() -> sqlite3.Connection:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS products (
-            sku TEXT PRIMARY KEY,
+            store TEXT NOT NULL,
+            sku TEXT NOT NULL,
             data TEXT NOT NULL,
             hash TEXT NOT NULL,
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (store, sku)
         )
         """
     )
@@ -51,19 +51,22 @@ def _hash_product(product: Dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _update_last_sync(conn: sqlite3.Connection, timestamp: float) -> None:
+def _update_last_sync(conn: sqlite3.Connection, store: str, timestamp: float) -> None:
     conn.execute(
         """
         INSERT INTO metadata(key, value)
         VALUES(?, ?)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value
         """,
-        ("last_sync", str(timestamp)),
+        (f"last_sync:{store}", str(timestamp)),
     )
 
 
-def _load_cached_products(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    rows = conn.execute("SELECT data FROM products ORDER BY sku").fetchall()
+def _load_cached_products(conn: sqlite3.Connection, store: str) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT data FROM products WHERE store = ? ORDER BY sku",
+        (store,),
+    ).fetchall()
     products: List[Dict[str, Any]] = []
     for row in rows:
         try:
@@ -73,10 +76,13 @@ def _load_cached_products(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return products
 
 
-def _replace_products(conn: sqlite3.Connection, products: List[Dict[str, Any]]) -> None:
+def _replace_products(conn: sqlite3.Connection, store: str, products: List[Dict[str, Any]]) -> None:
     existing_hashes = {
         row["sku"]: row["hash"]
-        for row in conn.execute("SELECT sku, hash FROM products")
+        for row in conn.execute(
+            "SELECT sku, hash FROM products WHERE store = ?",
+            (store,),
+        )
     }
     incoming_hashes = {}
     now = time.time()
@@ -90,45 +96,57 @@ def _replace_products(conn: sqlite3.Connection, products: List[Dict[str, Any]]) 
             continue
         conn.execute(
             """
-            INSERT INTO products(sku, data, hash, updated_at)
-            VALUES(?, ?, ?, ?)
-            ON CONFLICT(sku) DO UPDATE SET data=excluded.data, hash=excluded.hash, updated_at=excluded.updated_at
+            INSERT INTO products(store, sku, data, hash, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(store, sku) DO UPDATE SET data=excluded.data, hash=excluded.hash, updated_at=excluded.updated_at
             """,
-            (sku, _serialize_product(product), digest, now),
+            (store, sku, _serialize_product(product), digest, now),
         )
     removed = set(existing_hashes.keys()) - set(incoming_hashes.keys())
     if removed:
-        conn.executemany("DELETE FROM products WHERE sku = ?", ((sku,) for sku in removed))
-    _update_last_sync(conn, now)
+        conn.executemany(
+            "DELETE FROM products WHERE store = ? AND sku = ?",
+            ((store, sku) for sku in removed),
+        )
+    _update_last_sync(conn, store, now)
 
 
-def refresh_products_from_remote() -> List[Dict[str, Any]]:
+def refresh_products_from_remote(
+    store: str, fetch_remote: Callable[[], List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
     with _lock:
-        products = get_all_inapp_products()
+        products = fetch_remote()
         with _get_connection() as conn:
-            _replace_products(conn, products)
+            _replace_products(conn, store, products)
         logger.info("Refreshed product cache from remote", extra={"count": len(products)})
         return products
 
 
-def get_cached_products(force_refresh: bool = False) -> List[Dict[str, Any]]:
+def get_cached_products(
+    store: str,
+    fetch_remote: Callable[[], List[Dict[str, Any]]],
+    force_refresh: bool = False,
+) -> List[Dict[str, Any]]:
     with _lock:
         with _get_connection() as conn:
-            cached = _load_cached_products(conn)
+            cached = _load_cached_products(conn, store)
             if cached and not force_refresh:
                 return cached
-    return refresh_products_from_remote()
+    return refresh_products_from_remote(store, fetch_remote)
 
 
 def get_paginated_products(
-    token: Optional[str], page_size: int = DEFAULT_PAGE_SIZE
+    store: str,
+    fetch_remote: Callable[[], List[Dict[str, Any]]],
+    token: Optional[str],
+    page_size: int = DEFAULT_PAGE_SIZE,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     if page_size <= 0:
         raise ValueError("페이지 크기는 1 이상이어야 합니다.")
     if page_size > MAX_PAGE_SIZE:
         page_size = MAX_PAGE_SIZE
 
-    products = get_cached_products()
+    products = get_cached_products(store, fetch_remote)
     offset = 0
     if token:
         if not token.startswith("offset:"):
@@ -145,7 +163,7 @@ def get_paginated_products(
     return page, next_token
 
 
-def upsert_product(product: Dict[str, Any]) -> None:
+def upsert_product(store: str, product: Dict[str, Any]) -> None:
     sku = product.get("sku")
     if not sku:
         return
@@ -154,28 +172,34 @@ def upsert_product(product: Dict[str, Any]) -> None:
             now = time.time()
             conn.execute(
                 """
-                INSERT INTO products(sku, data, hash, updated_at)
-                VALUES(?, ?, ?, ?)
-                ON CONFLICT(sku) DO UPDATE SET data=excluded.data, hash=excluded.hash, updated_at=excluded.updated_at
+                INSERT INTO products(store, sku, data, hash, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                ON CONFLICT(store, sku) DO UPDATE SET data=excluded.data, hash=excluded.hash, updated_at=excluded.updated_at
                 """,
-                (sku, _serialize_product(product), _hash_product(product), now),
+                (store, sku, _serialize_product(product), _hash_product(product), now),
             )
-            _update_last_sync(conn, now)
+            _update_last_sync(conn, store, now)
 
 
-def delete_product(sku: str) -> None:
+def delete_product(store: str, sku: str) -> None:
     if not sku:
         return
     with _lock:
         with _get_connection() as conn:
-            conn.execute("DELETE FROM products WHERE sku = ?", (sku,))
-            _update_last_sync(conn, time.time())
+            conn.execute(
+                "DELETE FROM products WHERE store = ? AND sku = ?",
+                (store, sku),
+            )
+            _update_last_sync(conn, store, time.time())
 
 
-def get_last_sync_time() -> Optional[float]:
+def get_last_sync_time(store: str) -> Optional[float]:
     with _lock:
         with _get_connection() as conn:
-            row = conn.execute("SELECT value FROM metadata WHERE key = ?", ("last_sync",)).fetchone()
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (f"last_sync:{store}",),
+            ).fetchone()
             if not row:
                 return None
             try:
