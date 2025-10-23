@@ -9,6 +9,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -28,6 +30,9 @@ _APPLE_API_BASE = os.getenv(
     "APP_STORE_API_BASE_URL", "https://api.appstoreconnect.apple.com/v1"
 )
 _PRICE_POINTS_CACHE_TTL = int(os.getenv("APP_STORE_PRICE_POINT_CACHE_TTL", "1800"))
+
+_TOKEN_LOCK = threading.Lock()
+_TOKEN_CACHE: Optional[Tuple[str, int]] = None
 
 
 class AppleStoreConfigError(RuntimeError):
@@ -117,37 +122,85 @@ def _encode_jwt_with_cryptography(
 
 def _require_env(name: str) -> str:
     value = os.getenv(name)
-    if not value:
+    if value is None:
         raise AppleStoreConfigError(
             f"환경 변수 '{name}'이(가) 설정되어 있지 않습니다."
         )
+    value = value.strip()
+    if not value:
+        raise AppleStoreConfigError(
+            f"환경 변수 '{name}'이(가) 비어 있습니다."
+        )
     return value
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _require_uuid_env(name: str) -> str:
+    value = _require_env(name)
+    if not _UUID_RE.match(value):
+        raise AppleStoreConfigError(
+            f"환경 변수 '{name}' 값이 올바른 Issuer ID 형식(UUID)인지 확인해 주세요."
+        )
+    return value
+
+
+_KEY_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
+
+
+def _require_key_id_env(name: str) -> str:
+    value = _require_env(name)
+    if not _KEY_ID_RE.match(value.upper()):
+        raise AppleStoreConfigError(
+            f"환경 변수 '{name}' 값이 올바른 Key ID 형식(대문자 영숫자 10자)인지 확인해 주세요."
+        )
+    return value.upper()
 
 
 def _load_private_key() -> str:
     path = _require_env("APP_STORE_PRIVATE_KEY_PATH")
     try:
         with open(path, "r", encoding="utf-8") as fp:
-            return fp.read()
+            contents = fp.read()
     except OSError as exc:  # pragma: no cover - depends on environment
         raise AppleStoreConfigError(
             f"APP_STORE_PRIVATE_KEY_PATH에서 키를 읽을 수 없습니다: {exc}"
         ) from exc
 
+    contents = contents.lstrip("\ufeff").strip()
+    if "-----BEGIN" not in contents or "PRIVATE KEY-----" not in contents:
+        raise AppleStoreConfigError(
+            "Apple API 비공개 키 파일 형식이 올바르지 않습니다. App Store Connect에서 내려받은 .p8 파일인지 확인해 주세요."
+        )
+    return contents + ("\n" if not contents.endswith("\n") else "")
+
 
 def _generate_token() -> str:
-    issuer_id = _require_env("APP_STORE_ISSUER_ID")
-    key_id = _require_env("APP_STORE_KEY_ID")
+    global _TOKEN_CACHE
+    issuer_id = _require_uuid_env("APP_STORE_ISSUER_ID")
+    key_id = _require_key_id_env("APP_STORE_KEY_ID")
     private_key = _load_private_key()
 
     now = int(time.time())
-    payload = {
-        "iss": issuer_id,
-        "iat": now,
-        "exp": now + 20 * 60,
-        "aud": "appstoreconnect-v1",
-    }
-    return _encode_jwt(payload, private_key, {"kid": key_id, "typ": "JWT"})
+    with _TOKEN_LOCK:
+        cached = _TOKEN_CACHE
+        if cached and now < cached[1] - 30:
+            return cached[0]
+
+        issued_at = now - 10  # Allow small clock skew for local environments
+        expires_at = issued_at + 19 * 60  # Keep lifetime under Apple's 20 minute limit
+        payload = {
+            "iss": issuer_id,
+            "iat": issued_at,
+            "exp": expires_at,
+            "aud": "appstoreconnect-v1",
+        }
+        token = _encode_jwt(payload, private_key, {"kid": key_id, "typ": "JWT"})
+        _TOKEN_CACHE = (token, expires_at)
+        return token
 
 
 def _auth_headers() -> Dict[str, str]:
@@ -156,6 +209,12 @@ def _auth_headers() -> Dict[str, str]:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+
+
+def _invalidate_token_cache() -> None:
+    global _TOKEN_CACHE
+    with _TOKEN_LOCK:
+        _TOKEN_CACHE = None
 
 
 def _request(
@@ -178,15 +237,44 @@ def _request(
         timeout=30,
     )
     if response.status_code >= 400:
+        body_text = response.text.strip()
         logger.error(
-            "Apple API error", extra={"status": response.status_code, "body": response.text}
+            "Apple API error", extra={"status": response.status_code, "body": body_text}
         )
+        if response.status_code == 401:
+            _invalidate_token_cache()
+            raise AppleStoreConfigError(
+                _format_authorization_error(body_text)
+            )
         raise RuntimeError(
-            f"Apple API 오류 {response.status_code}: {response.text.strip()}"
+            f"Apple API 오류 {response.status_code}: {body_text}"
         )
     if response.status_code == 204 or not response.content:
         return {}
     return response.json()
+
+
+def _format_authorization_error(body_text: str) -> str:
+    guidance = (
+        "Apple API 인증에 실패했습니다. Issuer ID, Key ID, 비공개 키 파일을 다시 확인하고 "
+        "서버의 시스템 시간이 정확한지 검증해 주세요."
+    )
+    if not body_text:
+        return guidance
+    try:
+        payload = json.loads(body_text)
+    except json.JSONDecodeError:
+        return f"{guidance} 원본 오류: {body_text}"
+
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors:
+        entry = errors[0] or {}
+        code = entry.get("code") or entry.get("status")
+        detail = entry.get("detail") or entry.get("title")
+        if code or detail:
+            suffix = " ".join(filter(None, [f"[{code}]" if code else "", detail]))
+            return f"{guidance} {suffix}".strip()
+    return f"{guidance} 원본 오류: {body_text}"
 
 
 def _extract_cursor(next_link: Optional[str]) -> Optional[str]:
