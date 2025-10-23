@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime as _dt
+import hashlib
 import logging
 import os
 import time
@@ -255,10 +258,51 @@ def _format_iso8601(date: Optional[str]) -> Optional[str]:
     return parsed.astimezone(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _normalize_localizations(
+    localizations: Iterable[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for entry in localizations:
+        if entry is None:
+            continue
+        if hasattr(entry, "model_dump"):
+            data = entry.model_dump()  # type: ignore[attr-defined]
+        elif isinstance(entry, dict):
+            data = dict(entry)
+        else:
+            data = {
+                key: getattr(entry, key)
+                for key in ("locale", "name", "description", "review_screenshot")
+                if hasattr(entry, key)
+            }
+        review = data.get("review_screenshot") or data.get("reviewScreenshot")
+        review_payload = None
+        if isinstance(review, dict):
+            filename = review.get("filename") or review.get("fileName")
+            content_type = review.get("content_type") or review.get("mimeType")
+            encoded = review.get("data") or review.get("base64")
+            if filename and encoded:
+                review_payload = {
+                    "filename": filename,
+                    "content_type": content_type or "image/png",
+                    "data": encoded,
+                }
+        normalized.append(
+            {
+                "locale": data.get("locale"),
+                "name": data.get("name", ""),
+                "description": data.get("description", ""),
+                "review_screenshot": review_payload,
+            }
+        )
+    return normalized
+
+
 def _ensure_localizations(
     inapp_id: str,
-    localizations: Iterable[Dict[str, str]],
-) -> None:
+    localizations: Iterable[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    normalized = _normalize_localizations(localizations)
     existing = _request(
         "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
     ).get("data", [])
@@ -266,14 +310,16 @@ def _ensure_localizations(
         entry.get("attributes", {}).get("locale"): entry for entry in existing or []
     }
 
-    desired_locales = {loc.get("locale") for loc in localizations if loc.get("locale")}
+    desired_locales = {
+        loc.get("locale") for loc in normalized if isinstance(loc.get("locale"), str)
+    }
 
     # Remove localizations not present anymore
     for locale, entry in existing_by_locale.items():
         if locale not in desired_locales and entry.get("id"):
             _request("DELETE", f"/inAppPurchaseLocalizations/{entry['id']}")
 
-    for loc in localizations:
+    for loc in normalized:
         locale = loc.get("locale")
         if not locale:
             continue
@@ -302,9 +348,142 @@ def _ensure_localizations(
         else:
             _request("POST", "/inAppPurchaseLocalizations", json=payload)
 
+    refreshed = _request(
+        "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
+    ).get("data", [])
+    locale_ids: Dict[str, str] = {}
+    for entry in refreshed or []:
+        entry_id = entry.get("id")
+        attributes = entry.get("attributes") or {}
+        locale = attributes.get("locale")
+        if isinstance(locale, str) and entry_id:
+            locale_ids[locale] = entry_id
+
+    return normalized, locale_ids
+
 
 def _build_price_point_cache_key(price_tier: str, territory: str) -> str:
     return f"{price_tier}:{territory.upper()}"
+
+
+def _decode_screenshot_data(encoded: str) -> bytes:
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RuntimeError("스크린샷 데이터를 디코딩할 수 없습니다.") from exc
+
+
+def _get_existing_review_screenshot(localization_id: str) -> Optional[str]:
+    response = _request(
+        "GET",
+        f"/inAppPurchaseLocalizations/{localization_id}/inAppPurchaseAppStoreReviewScreenshot",
+    )
+    data = response.get("data")
+    if isinstance(data, dict):
+        screenshot_id = data.get("id")
+        if isinstance(screenshot_id, str):
+            return screenshot_id
+    return None
+
+
+def _perform_upload_operations(operations: Iterable[Dict[str, Any]], data: bytes) -> None:
+    for operation in operations or []:
+        url = operation.get("url")
+        method = operation.get("method") or "PUT"
+        if not url:
+            continue
+        headers = {
+            header.get("name"): header.get("value")
+            for header in operation.get("requestHeaders") or []
+            if header.get("name")
+        }
+        length = int(operation.get("length") or len(data))
+        offset = int(operation.get("offset") or 0)
+        chunk = data[offset : offset + length]
+        response = requests.request(method, url, headers=headers, data=chunk, timeout=60)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                "스크린샷 업로드 중 오류가 발생했습니다: "
+                f"{response.status_code} {response.text.strip()}"
+            )
+
+
+def _create_review_screenshot_record(
+    localization_id: str, screenshot: Dict[str, Any]
+) -> Dict[str, Any]:
+    filename = screenshot.get("filename") or "review.png"
+    content_type = screenshot.get("content_type") or "image/png"
+    encoded = screenshot.get("data")
+    if not isinstance(encoded, str):
+        raise RuntimeError("스크린샷 데이터가 올바르지 않습니다.")
+    binary = _decode_screenshot_data(encoded)
+    checksum = hashlib.md5(binary).hexdigest()
+    payload = {
+        "data": {
+            "type": "inAppPurchaseAppStoreReviewScreenshots",
+            "attributes": {
+                "fileName": filename,
+                "fileSize": len(binary),
+                "mimeType": content_type,
+                "sourceFileChecksum": checksum,
+                "uploaded": False,
+            },
+            "relationships": {
+                "inAppPurchaseLocalization": {
+                    "data": {
+                        "type": "inAppPurchaseLocalizations",
+                        "id": localization_id,
+                    }
+                }
+            },
+        }
+    }
+    response = _request("POST", "/inAppPurchaseAppStoreReviewScreenshots", json=payload)
+    data = response.get("data")
+    if not isinstance(data, dict):
+        raise RuntimeError("스크린샷 생성에 실패했습니다.")
+    attributes = data.get("attributes") or {}
+    upload_operations = attributes.get("uploadOperations") or []
+    _perform_upload_operations(upload_operations, binary)
+    screenshot_id = data.get("id")
+    if screenshot_id:
+        _request(
+            "PATCH",
+            f"/inAppPurchaseAppStoreReviewScreenshots/{screenshot_id}",
+            json={
+                "data": {
+                    "type": "inAppPurchaseAppStoreReviewScreenshots",
+                    "id": screenshot_id,
+                    "attributes": {"uploaded": True},
+                }
+            },
+        )
+    return data
+
+
+def _replace_review_screenshot(localization_id: str, screenshot: Dict[str, Any]) -> None:
+    existing_id = _get_existing_review_screenshot(localization_id)
+    if existing_id:
+        _request("DELETE", f"/inAppPurchaseAppStoreReviewScreenshots/{existing_id}")
+    _create_review_screenshot_record(localization_id, screenshot)
+
+
+def _sync_review_screenshots(
+    locale_ids: Dict[str, str], localizations: Iterable[Dict[str, Any]]
+) -> None:
+    for loc in localizations:
+        locale = loc.get("locale")
+        screenshot = loc.get("review_screenshot")
+        if not locale or not screenshot:
+            continue
+        localization_id = locale_ids.get(locale)
+        if not localization_id:
+            continue
+        try:
+            _replace_review_screenshot(localization_id, screenshot)
+        except Exception:
+            logger.exception("Failed to upload review screenshot for locale %s", locale)
+            raise
 
 
 @dataclass
@@ -415,13 +594,11 @@ def create_inapp_purchase(
         raise RuntimeError("인앱 상품 생성에 실패했습니다.")
 
     inapp_id = result["id"]
-    _ensure_localizations(
+    normalized_localizations, locale_ids = _ensure_localizations(
         inapp_id,
-        [
-            {"locale": loc.get("locale"), "name": loc.get("name"), "description": loc.get("description")}
-            for loc in localizations
-        ],
+        localizations,
     )
+    _sync_review_screenshots(locale_ids, normalized_localizations)
     _replace_price_schedule(inapp_id, price_tier, base_territory)
 
     refreshed = _request("GET", f"/inAppPurchases/{inapp_id}", params={"include": "inAppPurchaseLocalizations,inAppPurchasePrices"})
@@ -463,13 +640,11 @@ def update_inapp_purchase(
         }
         _request("PATCH", f"/inAppPurchases/{inapp_id}", json=payload)
 
-    _ensure_localizations(
+    normalized_localizations, locale_ids = _ensure_localizations(
         inapp_id,
-        [
-            {"locale": loc.get("locale"), "name": loc.get("name"), "description": loc.get("description")}
-            for loc in localizations
-        ],
+        localizations,
     )
+    _sync_review_screenshots(locale_ids, normalized_localizations)
     _replace_price_schedule(inapp_id, price_tier, base_territory)
 
     refreshed = _request("GET", f"/inAppPurchases/{inapp_id}", params={"include": "inAppPurchaseLocalizations,inAppPurchasePrices"})

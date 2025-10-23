@@ -1,8 +1,14 @@
+import base64
+import binascii
 import csv
 import io
 import logging
+import mimetypes
+import os
+import posixpath
+import zipfile
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -167,10 +173,29 @@ class BulkCreateApplyRequest(BaseModel):
     operations: List[BulkCreateOperation]
 
 
+class AppleReviewScreenshot(BaseModel):
+    filename: str = Field(..., min_length=1)
+    content_type: str = Field(..., min_length=1)
+    data: str = Field(..., min_length=1)
+
+    @field_validator("data")
+    @classmethod
+    def validate_base64(cls, value: str) -> str:
+        try:
+            base64.b64decode(value, validate=True)
+        except binascii.Error as exc:
+            raise ValueError("스크린샷 데이터는 base64 문자열이어야 합니다.") from exc
+        return value
+
+    def decode_bytes(self) -> bytes:
+        return base64.b64decode(self.data)
+
+
 class AppleLocalization(BaseModel):
     locale: str = Field(..., min_length=2)
     name: str = Field(..., min_length=1)
     description: str = Field(..., min_length=1)
+    review_screenshot: Optional[AppleReviewScreenshot] = None
 
 
 class AppleCreateInAppRequest(BaseModel):
@@ -306,6 +331,88 @@ def _collect_locales_from_apple_products(products: Iterable[Dict[str, Any]]) -> 
     return sorted(locales)
 
 
+def _normalize_zip_path(name: str) -> str:
+    normalized = posixpath.normpath(name.replace("\\", "/")).strip("/")
+    return normalized
+
+
+def _detect_content_type(filename: str) -> str:
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed:
+        return guessed
+    return "application/octet-stream"
+
+
+def _extract_csv_bundle(content: bytes, filename: str | None) -> Tuple[bytes, Dict[str, Dict[str, Any]]]:
+    if not filename or not filename.lower().endswith(".zip"):
+        return content, {}
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            csv_candidates: List[Tuple[str, bytes]] = []
+            attachments: Dict[str, Dict[str, Any]] = {}
+            for entry in archive.infolist():
+                if entry.is_dir():
+                    continue
+                entry_name = _normalize_zip_path(entry.filename)
+                try:
+                    data = archive.read(entry)
+                except KeyError as exc:
+                    raise HTTPException(status_code=400, detail=f"ZIP 파일에서 {entry.filename} 을(를) 읽을 수 없습니다.") from exc
+                if entry_name.lower().endswith(".csv"):
+                    csv_candidates.append((entry_name, data))
+                    continue
+                attachment = {
+                    "filename": os.path.basename(entry_name) or entry_name,
+                    "content_type": _detect_content_type(entry_name),
+                    "data": data,
+                }
+                keys = {
+                    entry_name,
+                    entry_name.lower(),
+                    os.path.basename(entry_name),
+                    os.path.basename(entry_name).lower(),
+                }
+                for key in keys:
+                    if key:
+                        attachments.setdefault(key, attachment)
+            if not csv_candidates:
+                raise HTTPException(status_code=400, detail="ZIP 파일에서 CSV를 찾을 수 없습니다.")
+            csv_candidates.sort(key=lambda item: (item[0].count("/"), len(item[0])))
+            return csv_candidates[0][1], attachments
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="유효한 ZIP 파일이 아닙니다.") from exc
+
+    raise HTTPException(status_code=400, detail="ZIP 파일을 처리할 수 없습니다.")
+
+
+def _resolve_attachment(
+    value: str,
+    attachments: Dict[str, Dict[str, Any]] | None,
+) -> Dict[str, Any]:
+    if not value:
+        raise HTTPException(status_code=400, detail="스크린샷 파일명을 입력해주세요.")
+    if not attachments:
+        raise HTTPException(
+            status_code=400,
+            detail=f"스크린샷 파일 '{value}' 을(를) 찾을 수 없습니다. ZIP 파일에 이미지를 포함했는지 확인해주세요.",
+        )
+    normalized = _normalize_zip_path(value)
+    candidates = [
+        normalized,
+        normalized.lower(),
+        os.path.basename(normalized),
+        os.path.basename(normalized).lower(),
+    ]
+    for key in candidates:
+        if key in attachments:
+            return attachments[key]
+    raise HTTPException(
+        status_code=400,
+        detail=f"스크린샷 파일 '{value}' 을(를) ZIP 파일에서 찾을 수 없습니다.",
+    )
+
+
 def _parse_bool_cell(value: str, *, default: bool = False) -> bool:
     text = (value or "").strip().lower()
     if not text:
@@ -436,7 +543,9 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
     return rows, languages
 
 
-def _parse_apple_import_csv(content: bytes) -> tuple[List[Dict[str, str]], List[str]]:
+def _parse_apple_import_csv(
+    content: bytes, attachments: Dict[str, Dict[str, Any]] | None = None
+) -> tuple[List[Dict[str, Any]], List[str]]:
     try:
         decoded = content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -452,11 +561,40 @@ def _parse_apple_import_csv(content: bytes) -> tuple[List[Dict[str, str]], List[
             locales.add(name.split("_", 1)[1])
         if name.startswith("description_"):
             locales.add(name.split("_", 1)[1])
+        if name.startswith("screenshot_"):
+            locales.add(name.split("_", 1)[1])
 
-    rows: List[Dict[str, str]] = []
+    rows: List[Dict[str, Any]] = []
     for index, row in enumerate(reader, start=2):
         normalized = {key.strip(): (value or "").strip() for key, value in (row or {}).items()}
         normalized["__row"] = str(index)
+        screenshots: Dict[str, Dict[str, Any]] = {}
+        for locale in locales:
+            key = f"screenshot_{locale}"
+            screenshot_value = normalized.get(key, "")
+            if not screenshot_value:
+                continue
+            attachment = _resolve_attachment(screenshot_value, attachments)
+            data_bytes = attachment["data"]
+            if len(data_bytes) > 10 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"행 {index}: 스크린샷 '{screenshot_value}' 용량이 10MB를 초과합니다.",
+                )
+            content_type = attachment.get("content_type") or "application/octet-stream"
+            if content_type not in {"image/png", "image/jpeg"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"행 {index}: 스크린샷 '{screenshot_value}' 은 PNG 또는 JPG 파일이어야 합니다.",
+                )
+            encoded = base64.b64encode(data_bytes).decode("ascii")
+            screenshots[locale] = {
+                "filename": attachment.get("filename") or screenshot_value,
+                "content_type": content_type,
+                "data": encoded,
+            }
+        if screenshots:
+            normalized["__screenshots"] = screenshots
         rows.append(normalized)
 
     return rows, sorted(locale for locale in locales if locale)
@@ -731,7 +869,7 @@ def _build_import_operations(
 
 
 def _apple_row_to_payload(
-    row: Dict[str, str], locales: Iterable[str]
+    row: Dict[str, Any], locales: Iterable[str]
 ) -> AppleImportPayload:
     try:
         cleared_for_sale = _parse_bool_cell(row.get("cleared_for_sale", ""), default=True)
@@ -741,13 +879,29 @@ def _apple_row_to_payload(
 
     base_territory = row.get("base_territory") or "KOR"
     localizations: List[AppleLocalization] = []
+    screenshots_map = row.get("__screenshots") or {}
     for locale in locales:
         name = row.get(f"name_{locale}") or ""
         description = row.get(f"description_{locale}") or ""
         if not name and not description:
             continue
+        screenshot_payload = None
+        raw_screenshot = screenshots_map.get(locale)
+        if raw_screenshot:
+            try:
+                screenshot_payload = AppleReviewScreenshot(**raw_screenshot)
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"행 {row.get('__row')}: {locale} 로케일의 스크린샷 정보를 확인할 수 없습니다.",
+                ) from exc
         localizations.append(
-            AppleLocalization(locale=locale, name=name or "", description=description or "")
+            AppleLocalization(
+                locale=locale,
+                name=name or "",
+                description=description or "",
+                review_screenshot=screenshot_payload,
+            )
         )
 
     payload = AppleImportPayload(
@@ -1219,6 +1373,7 @@ async def api_apple_export_inapp() -> StreamingResponse:
         for locale in locales:
             fieldnames.append(f"name_{locale}")
             fieldnames.append(f"description_{locale}")
+            fieldnames.append(f"screenshot_{locale}")
 
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -1240,6 +1395,7 @@ async def api_apple_export_inapp() -> StreamingResponse:
                 loc = localizations.get(locale) or {}
                 row[f"name_{locale}"] = loc.get("name", "")
                 row[f"description_{locale}"] = loc.get("description", "")
+                row[f"screenshot_{locale}"] = ""
             writer.writerow(row)
 
         csv_bytes = output.getvalue().encode("utf-8-sig")
@@ -1358,7 +1514,8 @@ async def api_apple_import_preview(file: UploadFile = File(...)):
     if not content:
         raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
 
-    rows, locales = _parse_apple_import_csv(content)
+    csv_bytes, attachments = _extract_csv_bundle(content, file.filename)
+    rows, locales = _parse_apple_import_csv(csv_bytes, attachments)
 
     try:
         existing_products_raw = refresh_products_from_remote(
