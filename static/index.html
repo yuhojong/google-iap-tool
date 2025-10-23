@@ -15,10 +15,47 @@
             color: #222;
         }
         header {
-            background: #1a73e8;
+            background: linear-gradient(135deg, #1a73e8, #4fc3f7);
             color: #fff;
-            padding: 1.5rem;
-            text-align: center;
+            padding: 1.5rem 1rem;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+        }
+        .header-inner {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            gap: 1rem;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 2rem;
+            font-weight: 700;
+        }
+        nav.menu {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            justify-content: center;
+        }
+        nav.menu button {
+            padding: 0.65rem 1.25rem;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.6);
+            background: rgba(255, 255, 255, 0.15);
+            color: inherit;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s ease, box-shadow 0.2s ease;
+        }
+        nav.menu button:hover {
+            background: rgba(255, 255, 255, 0.25);
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+        }
+        nav.menu button.is-active {
+            background: #fff;
+            color: #1a73e8;
+            box-shadow: 0 10px 24px rgba(26, 115, 232, 0.24);
         }
         main {
             display: grid;
@@ -27,130 +64,66 @@
             max-width: 1200px;
             margin: 0 auto;
         }
-        section {
+        .app-section {
             background: #fff;
             border-radius: 12px;
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
-            padding: 1.5rem;
-        }
-        h1, h2 {
-            margin: 0 0 1rem;
-        }
-        .table-wrapper {
-            overflow-x: auto;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th,
-        td {
-            padding: 0.75rem 1rem;
-            border-bottom: 1px solid #e0e0e0;
-            text-align: left;
-            vertical-align: top;
-        }
-        thead th {
-            background: #eef3ff;
-            font-weight: 700;
-            color: #1a237e;
-        }
-        tbody tr:hover {
-            background: #f8fbff;
-        }
-        .description-cell {
-            max-width: 320px;
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-        .table-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-        }
-        .table-actions button {
-            flex: 0 0 auto;
-        }
-        button.button-secondary {
-            background: #5f6368;
-        }
-        button.button-danger {
-            background: #d93025;
-        }
-        dialog {
-            border: none;
-            border-radius: 16px;
-            padding: 0;
-            max-width: 640px;
-            width: min(640px, 92vw);
-            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.2);
-        }
-        dialog::backdrop {
-            background: rgba(0, 0, 0, 0.4);
-        }
-        dialog form {
+            padding: 2rem;
             display: grid;
-            gap: 1rem;
-            padding: 1.5rem;
+            gap: 1.5rem;
         }
-        .dialog-header {
+        .app-section[hidden] {
+            display: none;
+        }
+        h2 {
             margin: 0;
+            font-size: 1.6rem;
         }
-        .dialog-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 0.75rem;
-        }
-        .dialog-actions button.button-secondary {
-            background: #5f6368;
-        }
-        .dialog-hint {
-            margin: 0;
+        .hint {
             color: #555;
             font-weight: 400;
+            margin: 0;
+            line-height: 1.6;
         }
-        form {
-            display: grid;
+        .csv-actions {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
             gap: 1rem;
         }
-        label,
-        fieldset {
-            display: grid;
+        .csv-actions form {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .csv-actions input[type="file"] {
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 0.5rem;
+            background: #fff;
+        }
+        .template-controls {
+            display: flex;
+            align-items: center;
             gap: 0.5rem;
+            background: rgba(26, 115, 232, 0.08);
+            border-radius: 999px;
+            padding: 0.35rem 0.75rem;
+        }
+        .template-controls label {
             font-weight: 600;
+            font-size: 0.9rem;
         }
-        fieldset {
-            border: 1px solid #e0e0e0;
-            border-radius: 10px;
-            padding: 1rem;
-        }
-        input, textarea {
-            padding: 0.75rem;
-            border-radius: 8px;
-            border: 1px solid #ccc;
-            font-size: 1rem;
-        }
-        select {
-            padding: 0.75rem;
-            border-radius: 8px;
-            border: 1px solid #ccc;
-            font-size: 1rem;
-        }
-        button {
-            padding: 0.75rem 1rem;
+        .template-controls select {
             border: none;
+            background: transparent;
+            font-size: 0.9rem;
+            padding: 0.25rem 0.5rem;
             border-radius: 8px;
-            background: #1a73e8;
-            color: #fff;
-            font-size: 1rem;
-            cursor: pointer;
-        }
-        button[disabled] {
-            background: #999;
-            cursor: not-allowed;
         }
         .status {
-            margin-top: 1rem;
+            margin-top: 0.5rem;
             font-weight: 600;
         }
         .initial-loading {
@@ -177,29 +150,6 @@
             width: 0%;
             background: linear-gradient(90deg, #1a73e8, #4fc3f7);
             transition: width 0.3s ease;
-        }
-        .csv-actions {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 1rem;
-        }
-        .csv-actions form {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 0.75rem;
-        }
-        .csv-actions input[type="file"] {
-            border: 1px solid #ccc;
-            border-radius: 8px;
-            padding: 0.5rem;
-            background: #fff;
-        }
-        #import-preview {
-            margin-top: 1rem;
-            display: grid;
-            gap: 1rem;
         }
         .preview-group {
             border: 1px solid #e0e0e0;
@@ -238,6 +188,10 @@
         .operation-header {
             font-weight: 600;
             margin-bottom: 0.25rem;
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+            flex-wrap: wrap;
         }
         .operation-details {
             margin: 0.25rem 0 0;
@@ -257,13 +211,61 @@
         .translation-change-details li {
             white-space: pre-wrap;
         }
-        .pagination-controls {
+        .table-wrapper {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th,
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #e0e0e0;
+            text-align: left;
+            vertical-align: top;
+        }
+        thead th {
+            background: #eef3ff;
+            font-weight: 700;
+            color: #1a237e;
+        }
+        tbody tr:hover {
+            background: #f8fbff;
+        }
+        .description-cell {
+            max-width: 320px;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .table-actions {
             display: flex;
-            justify-content: space-between;
-            align-items: center;
             flex-wrap: wrap;
-            gap: 0.75rem;
-            margin-top: 1rem;
+            gap: 0.5rem;
+        }
+        .table-actions button {
+            flex: 0 0 auto;
+        }
+        .table-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+        }
+        .table-controls-actions {
+            margin-left: auto;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            align-items: center;
+        }
+        .search-input {
+            min-width: 220px;
+            padding: 0.65rem 1rem;
+            border-radius: 999px;
+            border: 1px solid #c5d9ff;
+            background: #f8fbff;
+            font-size: 0.95rem;
         }
         .page-size-control {
             display: flex;
@@ -279,7 +281,6 @@
         }
         .pagination {
             display: flex;
-            justify-content: flex-end;
             gap: 0.5rem;
         }
         .empty {
@@ -305,28 +306,103 @@
         .translation-card h4 {
             margin: 0;
         }
-        .hint {
-            color: #555;
-            font-weight: 400;
-            margin: 0;
-        }
-        .template-info {
+        label,
+        fieldset {
             display: grid;
-            gap: 0.75rem;
-            background: #eef3ff;
-            border: 1px solid #c5d9ff;
+            gap: 0.5rem;
+            font-weight: 600;
+        }
+        fieldset {
+            border: 1px solid #e0e0e0;
             border-radius: 10px;
             padding: 1rem;
         }
-        .template-details h3 {
-            margin: 0 0 0.5rem;
+        input,
+        textarea {
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            font-size: 1rem;
         }
-        .template-details ul {
+        select {
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            font-size: 1rem;
+        }
+        button {
+            padding: 0.75rem 1rem;
+            border: none;
+            border-radius: 8px;
+            background: #1a73e8;
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        button[disabled] {
+            background: #999;
+            cursor: not-allowed;
+        }
+        button.button-secondary {
+            background: #5f6368;
+        }
+        button.button-danger {
+            background: #d93025;
+        }
+        th.index-column {
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+        }
+        th.index-column::after {
+            content: '▲';
+            position: absolute;
+            right: 0.75rem;
+            font-size: 0.8rem;
+            color: #1a237e;
+            opacity: 0.6;
+        }
+        th.index-column[data-direction='desc']::after {
+            content: '▼';
+        }
+        dialog {
+            border: none;
+            border-radius: 16px;
+            padding: 0;
+            max-width: 640px;
+            width: min(640px, 92vw);
+            box-shadow: 0 25px 50px rgba(0, 0, 0, 0.2);
+        }
+        dialog::backdrop {
+            background: rgba(0, 0, 0, 0.4);
+        }
+        dialog form {
+            display: grid;
+            gap: 1rem;
+            padding: 1.5rem;
+        }
+        .dialog-header {
             margin: 0;
-            padding-left: 1.25rem;
         }
-        .template-details li {
-            line-height: 1.6;
+        .dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.75rem;
+        }
+        .dialog-hint {
+            margin: 0;
+            color: #555;
+            font-weight: 400;
+        }
+        @media (max-width: 900px) {
+            .table-controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .table-controls-actions {
+                margin-left: 0;
+                justify-content: space-between;
+            }
         }
         @media (max-width: 600px) {
             main {
@@ -335,22 +411,33 @@
             header {
                 padding: 1rem;
             }
+            nav.menu {
+                justify-content: flex-start;
+            }
+            .app-section {
+                padding: 1.5rem;
+            }
         }
     </style>
 </head>
 <body>
     <header>
-        <h1>Google Play IAP 관리자</h1>
+        <div class="header-inner">
+            <h1>Google Play IAP 관리자</h1>
+            <nav class="menu" aria-label="주요 메뉴">
+                <button type="button" class="menu-button is-active" data-target="section-bulk-management">IAP 벌크 관리</button>
+                <button type="button" class="menu-button" data-target="section-bulk-create">신규 IAP 벌크 등록</button>
+                <button type="button" class="menu-button" data-target="section-single-create">신규 IAP 등록</button>
+                <button type="button" class="menu-button" data-target="section-product-management">등록된 상품 관리</button>
+            </nav>
+        </div>
     </header>
     <main>
-        <div id="initial-progress" class="initial-loading" hidden>
-            <p id="initial-progress-text" class="hint">데이터를 불러오는 중...</p>
-            <div class="progress-bar">
-                <div id="initial-progress-bar" class="progress-bar-fill"></div>
+        <section id="section-bulk-management" class="app-section">
+            <div>
+                <h2>IAP 벌크 관리</h2>
+                <p class="hint">현재 등록된 상품 전체를 CSV로 내보내거나 수정·삭제·생성을 일괄 적용할 수 있습니다.</p>
             </div>
-        </div>
-        <section>
-            <h2>CSV 대량 관리</h2>
             <div class="csv-actions">
                 <button id="export-btn" type="button">CSV 내보내기</button>
                 <form id="import-form">
@@ -368,72 +455,41 @@
             </div>
             <div id="import-preview"></div>
         </section>
-        <section>
-            <h2>등록된 상품</h2>
-            <div id="iap-table-wrapper" class="table-wrapper" hidden>
-                <table class="iap-table">
-                    <thead>
-                        <tr>
-                            <th scope="col">SKU</th>
-                            <th scope="col">이름</th>
-                            <th scope="col">설명</th>
-                            <th scope="col">기본 언어</th>
-                            <th scope="col">가격</th>
-                            <th scope="col">상태</th>
-                            <th scope="col">작업</th>
-                        </tr>
-                    </thead>
-                    <tbody id="iap-table-body"></tbody>
-                </table>
+        <section id="section-bulk-create" class="app-section" hidden>
+            <div>
+                <h2>신규 IAP 벌크 등록</h2>
+                <p class="hint">빈 템플릿을 다운로드해 신규 상품 정보를 입력한 뒤 업로드하면, 추가될 항목을 미리 확인하고 적용할 수 있습니다. 이미 등록된 상품 수정이나 삭제는 이 메뉴에서 제공하지 않습니다.</p>
             </div>
-            <div id="empty-state" class="empty" hidden>등록된 상품이 없습니다.</div>
-            <div class="pagination-controls">
-                <label class="page-size-control" for="page-size-select">
-                    페이지당 표시
-                    <select id="page-size-select">
-                        <option value="20">20개</option>
-                        <option value="50" selected>50개</option>
-                        <option value="100">100개</option>
+            <div class="csv-actions">
+                <div class="template-controls">
+                    <label for="new-template-count">템플릿 행 수</label>
+                    <select id="new-template-count">
+                        <option value="20">20</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
                     </select>
-                </label>
-                <div class="pagination">
-                    <button id="prev-btn" disabled>이전</button>
-                    <button id="next-btn" disabled>다음</button>
+                </div>
+                <button id="new-template-btn" type="button">빈 CSV 템플릿 다운로드</button>
+                <form id="new-import-form">
+                    <input type="file" id="new-import-file" name="file" accept=".csv" />
+                    <button type="button" id="new-import-preview-btn">미리보기</button>
+                    <button type="button" id="new-import-apply-btn" disabled>적용</button>
+                </form>
+            </div>
+            <div id="new-import-status" class="status"></div>
+            <div id="new-import-progress" class="initial-loading" hidden>
+                <p id="new-import-progress-text" class="hint"></p>
+                <div class="progress-bar">
+                    <div id="new-import-progress-bar" class="progress-bar-fill"></div>
                 </div>
             </div>
+            <div id="new-import-preview"></div>
         </section>
-        <dialog id="edit-dialog">
-            <form id="edit-form">
-                <h3 class="dialog-header">상품 수정</h3>
-                <label>상품 ID (SKU)
-                    <input type="text" id="edit-sku" name="sku" readonly />
-                </label>
-                <label>기본 언어
-                    <select id="edit-default-language" name="default_language" required></select>
-                </label>
-                <label>상태
-                    <select id="edit-status-select" name="status" required></select>
-                </label>
-                <fieldset>
-                    <legend>기본 가격</legend>
-                    <label>priceMicros
-                        <input type="text" id="edit-price-micros" name="price_micros" required />
-                    </label>
-                    <label>통화 코드
-                        <input type="text" id="edit-price-currency" name="currency" maxlength="3" required />
-                    </label>
-                    <p class="hint dialog-hint">Google Play Console 형식과 동일한 마이크로 단위(priceMicros)를 입력하세요.</p>
-                </fieldset>
-                <div class="translations" id="edit-translations"></div>
-                <div class="dialog-actions">
-                    <button type="button" id="edit-cancel-btn" class="button-secondary">취소</button>
-                    <button type="submit">저장</button>
-                </div>
-                <div id="edit-status-message" class="status"></div>
-            </form>
-        </dialog>
-        <section>
-            <h2>새 상품 만들기</h2>
+        <section id="section-single-create" class="app-section" hidden>
+            <div>
+                <h2>신규 IAP 등록</h2>
+                <p class="hint">단일 상품을 생성하려면 아래 정보를 입력하고 제출하세요.</p>
+            </div>
             <form id="create-form">
                 <label>상품 ID (SKU)
                     <input type="text" name="sku" required minlength="3" />
@@ -445,7 +501,6 @@
                         <option value="zh-TW">중국어 번체 (zh-TW)</option>
                     </select>
                 </label>
-
                 <div class="translations">
                     <h3>번역 정보</h3>
                     <p class="hint">언어별로 이름과 설명을 입력하세요. 기본 언어 항목은 필수입니다.</p>
@@ -477,7 +532,6 @@
                         </label>
                     </div>
                 </div>
-
                 <label>가격 템플릿
                     <select name="price_template_id" id="price-template-select" required>
                         <option value="">가격 템플릿을 선택하세요</option>
@@ -490,22 +544,142 @@
                         <ul id="template-region-list"></ul>
                     </div>
                 </div>
-
                 <button type="submit">상품 생성</button>
                 <div id="form-status" class="status"></div>
             </form>
         </section>
+        <section id="section-product-management" class="app-section" hidden>
+            <div>
+                <h2>등록된 상품 관리</h2>
+                <p class="hint">SKU, 이름, 설명으로 검색하고 인덱스 열을 더블클릭해 순서를 오름차순·내림차순으로 전환할 수 있습니다.</p>
+            </div>
+            <div id="initial-progress" class="initial-loading" hidden>
+                <p id="initial-progress-text" class="hint">데이터를 불러오는 중...</p>
+                <div class="progress-bar">
+                    <div id="initial-progress-bar" class="progress-bar-fill"></div>
+                </div>
+            </div>
+            <div class="table-controls">
+                <input type="search" id="iap-search-input" class="search-input" placeholder="SKU, 이름 또는 설명 검색" aria-label="상품 검색" />
+                <div class="table-controls-actions">
+                    <label class="page-size-control" for="page-size-select">
+                        페이지당 표시
+                        <select id="page-size-select">
+                            <option value="20">20개</option>
+                            <option value="50" selected>50개</option>
+                            <option value="100">100개</option>
+                        </select>
+                    </label>
+                    <div class="pagination">
+                        <button id="prev-btn" type="button" disabled>이전</button>
+                        <button id="next-btn" type="button" disabled>다음</button>
+                    </div>
+                </div>
+            </div>
+            <div id="iap-table-wrapper" class="table-wrapper" hidden>
+                <table class="iap-table">
+                    <thead>
+                        <tr>
+                            <th scope="col" id="iap-index-header" class="index-column" tabindex="0" data-direction="asc">인덱스</th>
+                            <th scope="col">SKU</th>
+                            <th scope="col">이름</th>
+                            <th scope="col">설명</th>
+                            <th scope="col">기본 언어</th>
+                            <th scope="col">가격</th>
+                            <th scope="col">상태</th>
+                            <th scope="col">작업</th>
+                        </tr>
+                    </thead>
+                    <tbody id="iap-table-body"></tbody>
+                </table>
+            </div>
+            <div id="empty-state" class="empty" hidden>등록된 상품이 없습니다.</div>
+        </section>
+        <dialog id="edit-dialog">
+            <form id="edit-form">
+                <h3 class="dialog-header">상품 수정</h3>
+                <label>상품 ID (SKU)
+                    <input type="text" id="edit-sku" name="sku" readonly />
+                </label>
+                <label>기본 언어
+                    <select id="edit-default-language" name="default_language" required></select>
+                </label>
+                <label>상태
+                    <select id="edit-status-select" name="status" required></select>
+                </label>
+                <fieldset>
+                    <legend>기본 가격</legend>
+                    <label>priceMicros
+                        <input type="text" id="edit-price-micros" name="price_micros" required />
+                    </label>
+                    <label>통화 코드
+                        <input type="text" id="edit-price-currency" name="currency" maxlength="3" required />
+                    </label>
+                    <p class="hint dialog-hint">Google Play Console 형식과 동일한 마이크로 단위(priceMicros)를 입력하세요.</p>
+                </fieldset>
+                <div class="translations" id="edit-translations"></div>
+                <div class="dialog-actions">
+                    <button type="button" id="edit-cancel-btn" class="button-secondary">취소</button>
+                    <button type="submit">저장</button>
+                </div>
+                <div id="edit-status-message" class="status"></div>
+            </form>
+        </dialog>
     </main>
     <script>
+        const SECTION_IDS = {
+            bulkManagement: 'section-bulk-management',
+            bulkCreate: 'section-bulk-create',
+            singleCreate: 'section-single-create',
+            productManagement: 'section-product-management',
+        };
+        const navButtons = document.querySelectorAll('.menu-button');
+        const sectionMap = new Map([
+            [SECTION_IDS.bulkManagement, document.getElementById(SECTION_IDS.bulkManagement)],
+            [SECTION_IDS.bulkCreate, document.getElementById(SECTION_IDS.bulkCreate)],
+            [SECTION_IDS.singleCreate, document.getElementById(SECTION_IDS.singleCreate)],
+            [SECTION_IDS.productManagement, document.getElementById(SECTION_IDS.productManagement)],
+        ]);
+        let activeSectionId = SECTION_IDS.bulkManagement;
+
+        function setActiveSection(id) {
+            if (!sectionMap.has(id)) {
+                return;
+            }
+            activeSectionId = id;
+            sectionMap.forEach((section, key) => {
+                if (!section) return;
+                section.hidden = key !== id;
+            });
+            navButtons.forEach((button) => {
+                if (button.dataset.target === id) {
+                    button.classList.add('is-active');
+                } else {
+                    button.classList.remove('is-active');
+                }
+            });
+        }
+
+        navButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const target = button.dataset.target;
+                setActiveSection(target);
+            });
+        });
+
+        setActiveSection(activeSectionId);
+
         const tableWrapper = document.getElementById('iap-table-wrapper');
         const listEl = document.getElementById('iap-table-body');
         const emptyEl = document.getElementById('empty-state');
         const nextBtn = document.getElementById('next-btn');
         const prevBtn = document.getElementById('prev-btn');
         const pageSizeSelect = document.getElementById('page-size-select');
+        const searchInput = document.getElementById('iap-search-input');
+        const indexHeader = document.getElementById('iap-index-header');
         const form = document.getElementById('create-form');
         const statusEl = document.getElementById('form-status');
-        const submitBtn = form.querySelector('button[type="submit"]');
+        const submitBtn = form ? form.querySelector('button[type="submit"]') : null;
         const translationLanguages = ['ko-KR', 'en-SG', 'zh-TW'];
         const templateSelect = document.getElementById('price-template-select');
         const templateDescription = document.getElementById('template-description');
@@ -522,6 +696,17 @@
         const importProgress = document.getElementById('import-progress');
         const importProgressText = document.getElementById('import-progress-text');
         const importProgressBar = document.getElementById('import-progress-bar');
+        const newTemplateBtn = document.getElementById('new-template-btn');
+        const newTemplateCountSelect = document.getElementById('new-template-count');
+        const newImportForm = document.getElementById('new-import-form');
+        const newImportFileInput = document.getElementById('new-import-file');
+        const newImportPreviewBtn = document.getElementById('new-import-preview-btn');
+        const newImportApplyBtn = document.getElementById('new-import-apply-btn');
+        const newImportStatusEl = document.getElementById('new-import-status');
+        const newImportPreviewEl = document.getElementById('new-import-preview');
+        const newImportProgress = document.getElementById('new-import-progress');
+        const newImportProgressText = document.getElementById('new-import-progress-text');
+        const newImportProgressBar = document.getElementById('new-import-progress-bar');
         const editDialog = document.getElementById('edit-dialog');
         const editForm = document.getElementById('edit-form');
         const editSkuInput = document.getElementById('edit-sku');
@@ -561,14 +746,30 @@
         let currentToken = undefined;
         let nextToken = undefined;
         let pendingOperations = [];
+        let pendingNewOperations = [];
         let editingItem = null;
         let initialLoadingActive = false;
         let initialStepsCompleted = 0;
         let initialStepsTotal = 0;
         let pageSize = 50;
-        let importProgressTimer = null;
-        let importProgressValue = 10;
-        let importProgressDirection = 1;
+        let currentItems = [];
+        let currentSearchTerm = '';
+        let indexSortDirection = 'asc';
+        let currentPageStartIndex = 0;
+
+        function createProgressTracker(container, bar, text) {
+            return {
+                container,
+                bar,
+                text,
+                timer: null,
+                value: 10,
+                direction: 1,
+            };
+        }
+
+        const importProgressTracker = createProgressTracker(importProgress, importProgressBar, importProgressText);
+        const newImportProgressTracker = createProgressTracker(newImportProgress, newImportProgressBar, newImportProgressText);
 
         if (pageSizeSelect) {
             const parsed = Number(pageSizeSelect.value);
@@ -583,6 +784,9 @@
 
         if (importForm) {
             importForm.addEventListener('submit', (event) => event.preventDefault());
+        }
+        if (newImportForm) {
+            newImportForm.addEventListener('submit', (event) => event.preventDefault());
         }
 
         function startInitialLoading(totalSteps) {
@@ -638,58 +842,89 @@
             }
         }
 
-        function startImportPreviewProgress(message = '변경 사항을 확인 중입니다') {
-            if (importProgressTimer) {
-                clearInterval(importProgressTimer);
+        function startProgress(tracker, message = '') {
+            if (!tracker) return;
+            if (tracker.timer) {
+                clearInterval(tracker.timer);
             }
-            importProgressValue = 10;
-            importProgressDirection = 1;
-            if (importProgress) {
-                importProgress.hidden = false;
+            tracker.value = 10;
+            tracker.direction = 1;
+            if (tracker.container) {
+                tracker.container.hidden = false;
             }
-            if (importProgressText) {
-                importProgressText.textContent = message;
+            if (tracker.text && message) {
+                tracker.text.textContent = message;
             }
-            if (importProgressBar) {
-                importProgressBar.style.width = `${importProgressValue}%`;
+            if (tracker.bar) {
+                tracker.bar.style.width = `${tracker.value}%`;
             }
-            importProgressTimer = window.setInterval(() => {
-                if (!importProgressBar) {
+            tracker.timer = window.setInterval(() => {
+                if (!tracker.bar) {
                     return;
                 }
-                importProgressValue += importProgressDirection * 5;
-                if (importProgressValue >= 95) {
-                    importProgressValue = 95;
-                    importProgressDirection = -1;
-                } else if (importProgressValue <= 10) {
-                    importProgressValue = 10;
-                    importProgressDirection = 1;
+                tracker.value += tracker.direction * 5;
+                if (tracker.value >= 95) {
+                    tracker.value = 95;
+                    tracker.direction = -1;
+                } else if (tracker.value <= 10) {
+                    tracker.value = 10;
+                    tracker.direction = 1;
                 }
-                importProgressBar.style.width = `${importProgressValue}%`;
+                tracker.bar.style.width = `${tracker.value}%`;
             }, 150);
         }
 
-        function completeImportPreviewProgress({ message = '', isError = false } = {}) {
-            if (importProgressTimer) {
-                clearInterval(importProgressTimer);
-                importProgressTimer = null;
+        function completeProgress(tracker, { message = '', isError = false } = {}) {
+            if (!tracker) return;
+            if (tracker.timer) {
+                clearInterval(tracker.timer);
+                tracker.timer = null;
             }
-            if (importProgressBar) {
-                importProgressBar.style.width = '100%';
+            if (tracker.bar) {
+                tracker.bar.style.width = '100%';
             }
-            if (importProgressText && message) {
-                importProgressText.textContent = message;
+            if (tracker.text && message) {
+                tracker.text.textContent = message;
             }
             const delay = isError ? 1000 : 500;
-            if (importProgress) {
+            if (tracker.container) {
                 window.setTimeout(() => {
-                    if (importProgress) {
-                        importProgress.hidden = true;
-                    }
+                    tracker.container.hidden = true;
                 }, delay);
             }
         }
 
+        function renderTemplateDetails(template, message) {
+            if (!templateDescription || !templateDetails || !templateRegionList) {
+                return;
+            }
+            if (message) {
+                templateDescription.textContent = message;
+            } else if (template) {
+                const defaultInfo = `${template.default_price || ''} ${template.default_currency || ''}`.trim();
+                templateDescription.textContent = template.description || (defaultInfo ? `기본 가격: ${defaultInfo}` : '가격 템플릿 상세');
+            } else {
+                templateDescription.textContent = '가격 템플릿을 선택하면 지역별 가격이 표시됩니다.';
+            }
+
+            if (template && Array.isArray(template.regions) && template.regions.length) {
+                templateDetails.hidden = false;
+                templateRegionList.innerHTML = '';
+                template.regions.forEach((region) => {
+                    const li = document.createElement('li');
+                    let priceText = region.price ? `${region.price} ${region.currency || ''}`.trim() : '';
+                    if (!priceText && region.priceMicros) {
+                        const amount = Number(region.priceMicros) / 1_000_000;
+                        priceText = `${amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 })} ${region.currency || ''}`.trim();
+                    }
+                    li.textContent = `${region.region}: ${priceText}`.trim();
+                    templateRegionList.appendChild(li);
+                });
+            } else {
+                templateDetails.hidden = true;
+                templateRegionList.innerHTML = '';
+            }
+        }
         function formatPriceDisplay(price) {
             if (!price || !price.priceMicros) {
                 return '-';
@@ -919,131 +1154,79 @@
                 editTranslationsContainer.appendChild(card);
             });
         }
-
-        function cloneRegionalPrices(prices) {
-            if (!prices) return undefined;
-            const entries = Object.entries(prices);
-            if (!entries.length) {
-                return undefined;
-            }
-            const cloned = {};
-            entries.forEach(([region, price]) => {
-                if (!price) return;
-                cloned[region] = {
-                    priceMicros: String(price.priceMicros ?? ''),
-                    currency: price.currency || '',
-                };
-            });
-            return Object.keys(cloned).length ? cloned : undefined;
-        }
-
         function openEditDialog(item) {
-            if (!editForm || !editDialog) return;
             editingItem = item;
-            editForm.reset();
-            if (editStatusMessage) {
-                editStatusMessage.textContent = '';
-            }
-            const languages = Object.keys(item?.listings || {});
-            const normalizedLanguages = populateDefaultLanguageOptions(languages, item?.defaultLanguage);
-            populateStatusOptions(item?.status || 'active');
+            if (!item) return;
+            populateStatusOptions(item.status);
+            const languages = populateDefaultLanguageOptions(Object.keys(item.listings || {}), item.defaultLanguage);
+            renderEditTranslations(item, languages);
             if (editSkuInput) {
-                editSkuInput.value = item?.sku || '';
+                editSkuInput.value = item.sku || '';
+            }
+            if (editDefaultLanguageSelect) {
+                editDefaultLanguageSelect.value = item.defaultLanguage || languages[0] || '';
+            }
+            if (editStatusSelect) {
+                editStatusSelect.value = (item.status || '').toLowerCase() || 'active';
             }
             if (editPriceMicrosInput) {
-                editPriceMicrosInput.value = item?.defaultPrice?.priceMicros || '';
+                editPriceMicrosInput.value = item.defaultPrice?.priceMicros || '';
             }
             if (editPriceCurrencyInput) {
-                const currency = item?.defaultPrice?.currency || '';
-                editPriceCurrencyInput.value = currency ? currency.toUpperCase() : '';
+                editPriceCurrencyInput.value = item.defaultPrice?.currency || '';
             }
-            renderEditTranslations(item, normalizedLanguages);
             ensureDialogOpen();
         }
 
         async function handleEditSubmit(event) {
             event.preventDefault();
-            if (!editForm || !editingItem) return;
-            if (!editDefaultLanguageSelect || !editStatusSelect || !editPriceMicrosInput || !editPriceCurrencyInput) return;
-
-            const sku = editingItem.sku;
-            const defaultLanguage = editDefaultLanguageSelect.value;
-            const statusValue = editStatusSelect.value || 'active';
-            const priceMicros = editPriceMicrosInput.value.trim();
-            const currency = editPriceCurrencyInput.value.trim().toUpperCase();
-
-            if (!priceMicros) {
+            if (!editingItem) return;
+            if (!editForm) return;
+            if (!editSubmitBtn) return;
+            const formData = new FormData(editForm);
+            const defaultLanguage = formData.get('default_language');
+            const status = formData.get('status');
+            const priceMicros = formData.get('price_micros');
+            const priceCurrency = formData.get('currency');
+            if (!defaultLanguage || !status || !priceMicros || !priceCurrency) {
                 if (editStatusMessage) {
-                    editStatusMessage.textContent = '기본 가격 정보를 입력해주세요.';
+                    editStatusMessage.textContent = '필수 정보를 모두 입력해주세요.';
                 }
                 return;
             }
-            if (!currency) {
-                if (editStatusMessage) {
-                    editStatusMessage.textContent = '통화 코드를 입력해주세요.';
-                }
-                return;
-            }
-
-            const cards = editTranslationsContainer?.querySelectorAll('.translation-card') || [];
             const listings = {};
-            let missingLanguage = null;
-            cards.forEach((card) => {
+            const translations = editTranslationsContainer?.querySelectorAll('.translation-card') || [];
+            translations.forEach((card) => {
                 const language = card.dataset.language;
-                if (!language) {
-                    return;
-                }
+                if (!language) return;
                 const titleInput = card.querySelector(`input[name="title_${language}"]`);
-                const descriptionInput = card.querySelector(`textarea[name="description_${language}"]`);
-                const title = titleInput ? titleInput.value.trim() : '';
-                const description = descriptionInput ? descriptionInput.value.trim() : '';
-                if (!title || !description) {
-                    missingLanguage = language;
-                }
-                listings[language] = { title, description };
+                const descriptionTextarea = card.querySelector(`textarea[name="description_${language}"]`);
+                listings[language] = {
+                    title: titleInput?.value || '',
+                    description: descriptionTextarea?.value || '',
+                };
             });
-
-            if (missingLanguage) {
-                if (editStatusMessage) {
-                    editStatusMessage.textContent = `${missingLanguage} 번역은 이름과 설명이 모두 필요합니다.`;
-                }
-                return;
-            }
             if (!listings[defaultLanguage]) {
                 if (editStatusMessage) {
-                    editStatusMessage.textContent = '기본 언어 번역을 입력해주세요.';
+                    editStatusMessage.textContent = '기본 언어 번역 정보를 입력해주세요.';
                 }
                 return;
             }
-
             const payload = {
                 default_language: defaultLanguage,
-                status: statusValue,
+                status,
                 default_price: {
-                    priceMicros,
-                    currency,
+                    priceMicros: priceMicros,
+                    currency: priceCurrency,
                 },
                 listings,
             };
-
-            const regionalPrices = cloneRegionalPrices(editingItem.prices);
-            if (regionalPrices) {
-                payload.prices = regionalPrices;
-            }
-
-            if (editSubmitBtn) {
-                editSubmitBtn.disabled = true;
-            }
-            if (editCancelBtn) {
-                editCancelBtn.disabled = true;
-            }
+            editSubmitBtn.disabled = true;
             if (editStatusMessage) {
-                editStatusMessage.textContent = '상품을 수정하는 중입니다...';
+                editStatusMessage.textContent = '저장 중입니다...';
             }
-
-            let shouldClose = false;
             try {
-                const res = await fetch(`/api/inapp/${encodeURIComponent(sku)}`, {
+                const res = await fetch(`/api/inapp/${encodeURIComponent(editingItem.sku)}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -1051,32 +1234,27 @@
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({}));
                     const detail = Array.isArray(err.detail)
-                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
                         : err.detail;
                     throw new Error(detail || '상품 수정에 실패했습니다.');
                 }
-                await fetchList(currentToken);
-                shouldClose = true;
+                if (editStatusMessage) {
+                    editStatusMessage.textContent = '저장되었습니다.';
+                }
+                closeEditDialog();
+                fetchList(currentToken);
             } catch (error) {
                 if (editStatusMessage) {
                     editStatusMessage.textContent = error.message;
                 }
             } finally {
-                if (editSubmitBtn) {
-                    editSubmitBtn.disabled = false;
-                }
-                if (editCancelBtn) {
-                    editCancelBtn.disabled = false;
-                }
-                if (shouldClose) {
-                    closeEditDialog();
-                }
+                editSubmitBtn.disabled = false;
             }
         }
 
         async function handleDelete(item, triggerButton) {
             if (!item?.sku) return;
-            const confirmed = window.confirm(`'${item.sku}' 상품을 삭제하시겠습니까?`);
+            const confirmed = window.confirm(`'${item.sku}' 상품을 삭제하시겠습니?`);
             if (!confirmed) return;
             let previousText = '';
             if (triggerButton) {
@@ -1093,7 +1271,7 @@
                         : err.detail;
                     throw new Error(detail || '상품 삭제에 실패했습니다.');
                 }
-                await fetchList(currentToken);
+                fetchList(currentToken);
             } catch (error) {
                 window.alert(error.message);
             } finally {
@@ -1104,8 +1282,9 @@
             }
         }
 
-        function renderImportPreview(data) {
-            importPreviewEl.innerHTML = '';
+        function renderImportPreview(data, targetElement = importPreviewEl) {
+            if (!targetElement) return;
+            targetElement.innerHTML = '';
             const operations = data?.operations || [];
             const summary = data?.summary || {};
 
@@ -1113,14 +1292,9 @@
                 const message = document.createElement('p');
                 message.className = 'hint';
                 message.textContent = '변경 사항이 없습니다.';
-                importPreviewEl.appendChild(message);
+                targetElement.appendChild(message);
                 return;
             }
-
-            const summaryText = document.createElement('p');
-            summaryText.className = 'operation-header';
-            summaryText.textContent = `생성 ${summary.create || 0}건 · 업데이트 ${summary.update || 0}건 · 삭제 ${summary.delete || 0}건`;
-            importPreviewEl.appendChild(summaryText);
 
             const groups = { create: [], update: [], delete: [] };
             operations.forEach((op) => {
@@ -1128,6 +1302,28 @@
                     groups[op.action].push(op);
                 }
             });
+
+            const summaryOrder = ['create', 'update', 'delete'];
+            const summaryLabels = {
+                create: '생성',
+                update: '업데이트',
+                delete: '삭제',
+            };
+            const summaryParts = summaryOrder
+                .map((key) => {
+                    const raw = summary[key];
+                    const count =
+                        typeof raw === 'number' && raw >= 0 ? raw : groups[key]?.length || 0;
+                    return count > 0 ? `${summaryLabels[key]} ${count}건` : null;
+                })
+                .filter(Boolean);
+
+            const summaryText = document.createElement('p');
+            summaryText.className = 'operation-header';
+            summaryText.textContent = summaryParts.length
+                ? summaryParts.join(' · ')
+                : '예정된 변경 항목이 있습니다.';
+            targetElement.appendChild(summaryText);
 
             const actionLabels = {
                 create: '생성 예정',
@@ -1151,7 +1347,8 @@
                     const header = document.createElement('div');
                     header.className = 'operation-header';
                     const strong = document.createElement('strong');
-                    strong.textContent = op.sku;
+                    const labelText = op.index ? `#${op.index} ${op.sku}` : op.sku;
+                    strong.textContent = labelText;
                     header.appendChild(strong);
 
                     if (action === 'create' && op.data) {
@@ -1159,10 +1356,10 @@
                         const title = listing?.title ? ` - ${listing.title}` : '';
                         const priceText = formatPriceDisplay(op.data.default_price);
                         header.appendChild(document.createTextNode(`${title} (${op.data.status || '-'})`));
+                        item.appendChild(header);
                         const priceInfo = document.createElement('div');
                         priceInfo.className = 'operation-details';
                         priceInfo.textContent = `가격: ${priceText}`;
-                        item.appendChild(header);
                         item.appendChild(priceInfo);
                         const regionalPrices = buildRegionalPriceList(op.data.prices);
                         if (regionalPrices) {
@@ -1259,319 +1456,48 @@
                 });
 
                 groupSection.appendChild(list);
-                importPreviewEl.appendChild(groupSection);
+                targetElement.appendChild(groupSection);
             });
         }
-
-        async function handleExportCsv() {
-            importStatusEl.textContent = '';
-            exportBtn.disabled = true;
-            try {
-                const res = await fetch('/api/inapp/export');
-                if (!res.ok) {
-                    throw new Error('CSV 내보내기에 실패했습니다.');
-                }
-                const blob = await res.blob();
-                const url = URL.createObjectURL(blob);
-                const anchor = document.createElement('a');
-                anchor.href = url;
-                const timestamp = new Date().toISOString().replace(/[:T]/g, '').slice(0, 14);
-                anchor.download = `iap-products-${timestamp}.csv`;
-                document.body.appendChild(anchor);
-                anchor.click();
-                anchor.remove();
-                URL.revokeObjectURL(url);
-                importStatusEl.textContent = 'CSV 파일을 다운로드했습니다.';
-            } catch (error) {
-                importStatusEl.textContent = error.message;
-            } finally {
-                exportBtn.disabled = false;
+        function updateIndexHeaderIndicator() {
+            if (indexHeader) {
+                indexHeader.dataset.direction = indexSortDirection;
             }
         }
 
-        async function handleImportPreview() {
-            if (!importFileInput.files?.length) {
-                importStatusEl.textContent = 'CSV 파일을 선택해주세요.';
-                return;
+        function parseOffsetFromToken(token) {
+            if (!token || typeof token !== 'string') {
+                return 0;
             }
-            importStatusEl.textContent = '변경 사항을 확인 중입니다';
-            importPreviewBtn.disabled = true;
-            importApplyBtn.disabled = true;
-            if (importPreviewEl) {
-                importPreviewEl.innerHTML = '';
+            const match = token.match(/^offset:(\d+)$/);
+            if (!match) {
+                return 0;
             }
-            startImportPreviewProgress();
-            const formData = new FormData();
-            formData.append('file', importFileInput.files[0]);
-            let previewSucceeded = false;
-            try {
-                const res = await fetch('/api/inapp/import/preview', {
-                    method: 'POST',
-                    body: formData,
-                });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    const detail = Array.isArray(err.detail)
-                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
-                        : err.detail;
-                    throw new Error(detail || '미리보기에 실패했습니다.');
-                }
-                const data = await res.json();
-                pendingOperations = data.operations || [];
-                previewSucceeded = true;
-                renderImportPreview(data);
-                if (pendingOperations.length) {
-                    importStatusEl.textContent = '변경 사항을 확인한 뒤 적용 버튼을 눌러주세요.';
-                    importApplyBtn.disabled = false;
-                } else {
-                    importStatusEl.textContent = '적용할 변경 사항이 없습니다.';
-                }
-            } catch (error) {
-                importPreviewEl.innerHTML = '';
-                pendingOperations = [];
-                importStatusEl.textContent = error.message;
-            } finally {
-                importPreviewBtn.disabled = false;
-                completeImportPreviewProgress({
-                    message: previewSucceeded
-                        ? '변경 사항 확인 완료'
-                        : '변경 사항을 확인하는 중 오류가 발생했습니다.',
-                    isError: !previewSucceeded,
-                });
+            const value = Number.parseInt(match[1], 10);
+            if (!Number.isFinite(value) || value < 0) {
+                return 0;
             }
+            return value;
         }
 
-        async function handleImportApply() {
-            if (!pendingOperations.length) {
-                importStatusEl.textContent = '적용할 변경 사항이 없습니다.';
-                return;
+        function itemMatchesSearch(item, term) {
+            if (!term) {
+                return true;
             }
-            importStatusEl.textContent = '변경 사항을 적용하는 중입니다...';
-            importApplyBtn.disabled = true;
-            importPreviewBtn.disabled = true;
-            try {
-                const operationsPayload = pendingOperations.map((op) => {
-                    const base = { action: op.action, sku: op.sku };
-                    if (op.data) {
-                        base.data = JSON.parse(JSON.stringify(op.data));
-                    }
-                    return base;
-                });
-                const res = await fetch('/api/inapp/import/apply', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ operations: operationsPayload }),
-                });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    const detail = Array.isArray(err.detail)
-                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
-                        : err.detail;
-                    throw new Error(detail || '변경 사항 적용에 실패했습니다.');
-                }
-                importStatusEl.textContent = '변경 사항이 적용되었습니다.';
-                pendingOperations = [];
-                renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } });
-                importFileInput.value = '';
-                fetchList();
-            } catch (error) {
-                importStatusEl.textContent = error.message;
-                if (pendingOperations.length) {
-                    importApplyBtn.disabled = false;
-                }
-            } finally {
-                importPreviewBtn.disabled = false;
+            const normalized = term.toLowerCase();
+            const sku = (item.sku || '').toLowerCase();
+            if (sku.includes(normalized)) {
+                return true;
             }
-        }
-
-        function handlePageSizeChange() {
-            if (!pageSizeSelect) return;
-            const parsed = Number(pageSizeSelect.value);
-            if (!Number.isFinite(parsed) || parsed <= 0) {
-                pageSizeSelect.value = String(pageSize);
-                return;
-            }
-            const normalized = Math.min(Math.max(Math.floor(parsed), 1), MAX_PAGE_SIZE);
-            if (normalized !== parsed) {
-                pageSizeSelect.value = String(normalized);
-            }
-            if (normalized === pageSize) {
-                return;
-            }
-            pageSize = normalized;
-            tokenStack.length = 0;
-            currentToken = undefined;
-            nextToken = undefined;
-            if (prevBtn) {
-                prevBtn.disabled = true;
-            }
-            if (nextBtn) {
-                nextBtn.disabled = true;
-            }
-            fetchList();
-        }
-
-        if (exportBtn) {
-            exportBtn.addEventListener('click', handleExportCsv);
-        }
-        if (importPreviewBtn) {
-            importPreviewBtn.addEventListener('click', handleImportPreview);
-        }
-        if (importApplyBtn) {
-            importApplyBtn.addEventListener('click', handleImportApply);
-        }
-        if (pageSizeSelect) {
-            pageSizeSelect.addEventListener('change', handlePageSizeChange);
-        }
-
-        if (editCancelBtn) {
-            editCancelBtn.addEventListener('click', () => {
-                closeEditDialog();
-            });
-        }
-        if (editDialog) {
-            editDialog.addEventListener('cancel', (event) => {
-                event.preventDefault();
-                closeEditDialog();
-            });
-        }
-        if (editForm) {
-            editForm.addEventListener('submit', handleEditSubmit);
-        }
-
-        function renderTemplateDetails(template, message) {
-            if (message) {
-                templateDescription.textContent = message;
-            } else if (template) {
-                const defaultInfo = `${template.default_price} ${template.default_currency}`.trim();
-                templateDescription.textContent = template.description || `기본 가격: ${defaultInfo}`;
-            } else {
-                templateDescription.textContent = '가격 템플릿을 선택하면 지역별 가격이 표시됩니다.';
-            }
-
-            if (template && Array.isArray(template.regions) && template.regions.length) {
-                templateDetails.hidden = false;
-                templateRegionList.innerHTML = '';
-                template.regions.forEach((region) => {
-                    const li = document.createElement('li');
-                    let priceText = region.price ? `${region.price} ${region.currency}` : '';
-                    if (!priceText && region.priceMicros) {
-                        const amount = Number(region.priceMicros) / 1_000_000;
-                        priceText = `${amount.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 6 })} ${region.currency || ''}`.trim();
-                    }
-                    li.textContent = `${region.region}: ${priceText}`.trim();
-                    templateRegionList.appendChild(li);
-                });
-            } else {
-                templateDetails.hidden = true;
-                templateRegionList.innerHTML = '';
-            }
-        }
-
-        async function fetchTemplates(options = {}) {
-            const showProgress = Boolean(options.showProgress) && initialLoadingActive;
-            let success = false;
-            let errorMessage = '';
-            submitBtn.disabled = true;
-            if (showProgress) {
-                setInitialProgressMessage('가격 템플릿을 불러오는 중...');
-            }
-            try {
-                const res = await fetch('/api/pricing/templates');
-                if (!res.ok) {
-                    throw new Error('가격 템플릿을 불러오지 못했습니다.');
-                }
-                const data = await res.json();
-                const templates = data.templates || [];
-                templateMap.clear();
-                templateSelect.innerHTML = '<option value="">가격 템플릿을 선택하세요</option>';
-                if (!templates.length) {
-                    templateSelect.innerHTML = '<option value="">등록된 템플릿이 없습니다</option>';
-                    templateSelect.disabled = true;
-                    submitBtn.disabled = true;
-                    renderTemplateDetails(
-                        null,
-                        '등록된 상품에서 KRW 가격 템플릿을 찾을 수 없습니다. 기존 상품의 가격 구성을 확인해주세요.',
-                    );
-                    return;
-                }
-                templates.forEach((tpl) => {
-                    templateMap.set(tpl.id, tpl);
-                    const option = document.createElement('option');
-                    option.value = tpl.id;
-                    option.textContent = tpl.label;
-                    templateSelect.appendChild(option);
-                });
-                templateSelect.disabled = false;
-                submitBtn.disabled = false;
-                renderTemplateDetails(null);
-                success = true;
-            } catch (error) {
-                errorMessage = error.message;
-                templateSelect.innerHTML = '<option value="">템플릿 로딩 실패</option>';
-                templateSelect.disabled = true;
-                submitBtn.disabled = true;
-                renderTemplateDetails(null, error.message);
-            } finally {
-                if (showProgress) {
-                    finishInitialStep({ success, message: errorMessage || '가격 템플릿을 불러오지 못했습니다.' });
+            const listings = item.listings || {};
+            for (const listing of Object.values(listings)) {
+                const title = (listing.title || '').toLowerCase();
+                const description = (listing.description || '').toLowerCase();
+                if (title.includes(normalized) || description.includes(normalized)) {
+                    return true;
                 }
             }
-            return success;
-        }
-
-        async function fetchList(token, options = {}) {
-            const showProgress = Boolean(options.showProgress) && initialLoadingActive;
-            let success = false;
-            let errorMessage = '';
-            const activeToken = typeof token === 'string' && token.length ? token : undefined;
-            currentToken = activeToken;
-            nextToken = undefined;
-            if (showProgress) {
-                setInitialProgressMessage('등록된 상품을 불러오는 중...');
-            }
-            try {
-                const params = new URLSearchParams();
-                if (activeToken) {
-                    params.set('token', activeToken);
-                }
-                if (options.refresh) {
-                    params.set('refresh', 'true');
-                }
-                if (pageSize && Number.isFinite(pageSize) && pageSize > 0) {
-                    params.set('page_size', String(pageSize));
-                }
-                const query = params.toString();
-                const res = await fetch(`/api/inapp/list${query ? `?${query}` : ''}`);
-                if (!res.ok) {
-                    throw new Error('목록을 불러오지 못했습니다.');
-                }
-                const data = await res.json();
-                renderList(data.items || []);
-                nextToken = data.nextPageToken || undefined;
-                nextBtn.disabled = !nextToken;
-                prevBtn.disabled = tokenStack.length === 0;
-                success = true;
-            } catch (error) {
-                errorMessage = error.message;
-                if (listEl) {
-                    listEl.innerHTML = '';
-                }
-                if (tableWrapper) {
-                    tableWrapper.hidden = true;
-                }
-                if (emptyEl) {
-                    emptyEl.hidden = false;
-                    emptyEl.textContent = error.message;
-                }
-                nextBtn.disabled = true;
-                prevBtn.disabled = tokenStack.length === 0;
-            } finally {
-                if (showProgress) {
-                    finishInitialStep({ success, message: errorMessage || '상품 목록을 불러오지 못했습니다.' });
-                }
-            }
-            return success;
+            return false;
         }
 
         function renderList(items) {
@@ -1585,7 +1511,7 @@
                 }
                 if (emptyEl) {
                     emptyEl.hidden = false;
-                    emptyEl.textContent = '등록된 상품이 없습니다.';
+                    emptyEl.textContent = currentItems.length ? '검색 결과가 없습니다.' : '등록된 상품이 없습니다.';
                 }
                 return;
             }
@@ -1599,6 +1525,10 @@
 
             items.forEach((item) => {
                 const row = document.createElement('tr');
+
+                const indexCell = document.createElement('td');
+                indexCell.textContent = item.__index != null ? String(item.__index) : '-';
+                row.appendChild(indexCell);
 
                 const skuCell = document.createElement('td');
                 skuCell.textContent = item.sku || '-';
@@ -1653,26 +1583,460 @@
             });
         }
 
-        nextBtn.addEventListener('click', () => {
+        function updateTableDisplay() {
+            const baseItems = currentItems.slice();
+            let displayItems = baseItems;
+            if (currentSearchTerm) {
+                displayItems = displayItems.filter((item) => itemMatchesSearch(item, currentSearchTerm));
+            }
+            displayItems = displayItems
+                .slice()
+                .sort((a, b) => {
+                    const aIndex = Number(a.__index) || 0;
+                    const bIndex = Number(b.__index) || 0;
+                    return indexSortDirection === 'asc' ? aIndex - bIndex : bIndex - aIndex;
+                });
+            renderList(displayItems);
+        }
+
+        async function handleExportCsv() {
+            importStatusEl.textContent = '';
+            if (exportBtn) {
+                exportBtn.disabled = true;
+            }
+            try {
+                const res = await fetch('/api/inapp/export');
+                if (!res.ok) {
+                    throw new Error('CSV 내보내기에 실패했습니다.');
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                const timestamp = new Date().toISOString().replace(/[:T]/g, '').slice(0, 14);
+                anchor.download = `iap-products-${timestamp}.csv`;
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                URL.revokeObjectURL(url);
+                importStatusEl.textContent = 'CSV 파일을 다운로드했습니다.';
+            } catch (error) {
+                importStatusEl.textContent = error.message;
+            } finally {
+                if (exportBtn) {
+                    exportBtn.disabled = false;
+                }
+            }
+        }
+        async function handleImportPreview() {
+            if (!importFileInput?.files?.length) {
+                importStatusEl.textContent = 'CSV 파일을 선택해주세요.';
+                return;
+            }
+            importStatusEl.textContent = '변경 사항을 확인 중입니다';
+            importPreviewBtn.disabled = true;
+            importApplyBtn.disabled = true;
+            if (importPreviewEl) {
+                importPreviewEl.innerHTML = '';
+            }
+            startProgress(importProgressTracker, '변경 사항을 확인 중입니다...');
+            const formData = new FormData();
+            formData.append('file', importFileInput.files[0]);
+            let previewSucceeded = false;
+            try {
+                const res = await fetch('/api/inapp/import/preview', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '미리보기에 실패했습니다.');
+                }
+                const data = await res.json();
+                pendingOperations = data.operations || [];
+                previewSucceeded = true;
+                renderImportPreview(data, importPreviewEl);
+                if (pendingOperations.length) {
+                    importStatusEl.textContent = '변경 사항을 확인한 뒤 적용 버튼을 눌러주세요.';
+                    importApplyBtn.disabled = false;
+                } else {
+                    importStatusEl.textContent = '적용할 변경 사항이 없습니다.';
+                }
+            } catch (error) {
+                if (importPreviewEl) {
+                    importPreviewEl.innerHTML = '';
+                }
+                pendingOperations = [];
+                importStatusEl.textContent = error.message;
+            } finally {
+                importPreviewBtn.disabled = false;
+                completeProgress(importProgressTracker, {
+                    message: previewSucceeded ? '변경 사항 확인 완료' : '변경 사항을 확인하는 중 오류가 발생했습니다.',
+                    isError: !previewSucceeded,
+                });
+            }
+        }
+
+        async function handleImportApply() {
+            if (!pendingOperations.length) {
+                importStatusEl.textContent = '적용할 변경 사항이 없습니다.';
+                return;
+            }
+            importStatusEl.textContent = '변경 사항을 적용하는 중입니다...';
+            importApplyBtn.disabled = true;
+            importPreviewBtn.disabled = true;
+            try {
+                const operationsPayload = pendingOperations.map((op) => {
+                    const base = { action: op.action, sku: op.sku };
+                    if (op.data) {
+                        base.data = JSON.parse(JSON.stringify(op.data));
+                    }
+                    return base;
+                });
+                const res = await fetch('/api/inapp/import/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ operations: operationsPayload }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '변경 사항 적용에 실패했습니다.');
+                }
+                importStatusEl.textContent = '변경 사항이 적용되었습니다.';
+                pendingOperations = [];
+                renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, importPreviewEl);
+                if (importFileInput) {
+                    importFileInput.value = '';
+                }
+                fetchList();
+            } catch (error) {
+                importStatusEl.textContent = error.message;
+                if (pendingOperations.length) {
+                    importApplyBtn.disabled = false;
+                }
+            } finally {
+                importPreviewBtn.disabled = false;
+            }
+        }
+
+        async function handleNewTemplateDownload() {
+            const rowCount = Number(newTemplateCountSelect?.value) || 20;
+            newImportStatusEl.textContent = '';
+            if (newTemplateBtn) {
+                newTemplateBtn.disabled = true;
+            }
+            try {
+                const res = await fetch(`/api/inapp/new/template?row_count=${rowCount}`);
+                if (!res.ok) {
+                    throw new Error('템플릿 다운로드에 실패했습니다.');
+                }
+                const blob = await res.blob();
+                const url = URL.createObjectURL(blob);
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                const timestamp = new Date().toISOString().replace(/[:T]/g, '').slice(0, 14);
+                anchor.download = `iap-new-products-template-${timestamp}.csv`;
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                URL.revokeObjectURL(url);
+                newImportStatusEl.textContent = '빈 템플릿을 다운로드했습니다.';
+            } catch (error) {
+                newImportStatusEl.textContent = error.message;
+            } finally {
+                if (newTemplateBtn) {
+                    newTemplateBtn.disabled = false;
+                }
+            }
+        }
+
+        async function handleNewImportPreview() {
+            if (!newImportFileInput?.files?.length) {
+                newImportStatusEl.textContent = 'CSV 파일을 선택해주세요.';
+                return;
+            }
+            newImportStatusEl.textContent = '신규 항목을 확인 중입니다';
+            newImportPreviewBtn.disabled = true;
+            newImportApplyBtn.disabled = true;
+            if (newImportPreviewEl) {
+                newImportPreviewEl.innerHTML = '';
+            }
+            startProgress(newImportProgressTracker, '신규 상품을 분석 중입니다...');
+            const formData = new FormData();
+            formData.append('file', newImportFileInput.files[0]);
+            let previewSucceeded = false;
+            try {
+                const res = await fetch('/api/inapp/new/import/preview', {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '미리보기에 실패했습니다.');
+                }
+                const data = await res.json();
+                pendingNewOperations = data.operations || [];
+                previewSucceeded = true;
+                renderImportPreview(data, newImportPreviewEl);
+                if (pendingNewOperations.length) {
+                    newImportStatusEl.textContent = '신규 등록 내용을 확인한 뒤 적용 버튼을 눌러주세요.';
+                    newImportApplyBtn.disabled = false;
+                } else {
+                    newImportStatusEl.textContent = '추가할 신규 항목이 없습니다.';
+                }
+            } catch (error) {
+                if (newImportPreviewEl) {
+                    newImportPreviewEl.innerHTML = '';
+                }
+                pendingNewOperations = [];
+                newImportStatusEl.textContent = error.message;
+            } finally {
+                newImportPreviewBtn.disabled = false;
+                completeProgress(newImportProgressTracker, {
+                    message: previewSucceeded ? '신규 항목 확인 완료' : '신규 항목 확인 중 오류가 발생했습니다.',
+                    isError: !previewSucceeded,
+                });
+            }
+        }
+
+        async function handleNewImportApply() {
+            if (!pendingNewOperations.length) {
+                newImportStatusEl.textContent = '적용할 신규 항목이 없습니다.';
+                return;
+            }
+            newImportStatusEl.textContent = '신규 상품을 등록하는 중입니다...';
+            newImportApplyBtn.disabled = true;
+            newImportPreviewBtn.disabled = true;
+            try {
+                const operationsPayload = pendingNewOperations.map((op) => {
+                    const base = { action: op.action, sku: op.sku };
+                    if (op.data) {
+                        base.data = JSON.parse(JSON.stringify(op.data));
+                    }
+                    return base;
+                });
+                const res = await fetch('/api/inapp/new/import/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ operations: operationsPayload }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((item) => item.msg || item.detail).filter(Boolean).join(', ')
+                        : err.detail;
+                    throw new Error(detail || '신규 상품 등록에 실패했습니다.');
+                }
+                newImportStatusEl.textContent = '신규 상품을 등록했습니다.';
+                pendingNewOperations = [];
+                renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, newImportPreviewEl);
+                if (newImportFileInput) {
+                    newImportFileInput.value = '';
+                }
+                tokenStack.length = 0;
+                currentToken = undefined;
+                fetchList(undefined, { refresh: true });
+            } catch (error) {
+                newImportStatusEl.textContent = error.message;
+                if (pendingNewOperations.length) {
+                    newImportApplyBtn.disabled = false;
+                }
+            } finally {
+                newImportPreviewBtn.disabled = false;
+            }
+        }
+        function handlePageSizeChange() {
+            if (!pageSizeSelect) return;
+            const parsed = Number(pageSizeSelect.value);
+            if (!Number.isFinite(parsed) || parsed <= 0) {
+                pageSizeSelect.value = String(pageSize);
+                return;
+            }
+            const normalized = Math.min(Math.max(Math.floor(parsed), 1), MAX_PAGE_SIZE);
+            if (normalized !== parsed) {
+                pageSizeSelect.value = String(normalized);
+            }
+            if (normalized === pageSize) {
+                return;
+            }
+            pageSize = normalized;
+            tokenStack.length = 0;
+            currentToken = undefined;
+            nextToken = undefined;
+            if (prevBtn) {
+                prevBtn.disabled = true;
+            }
+            if (nextBtn) {
+                nextBtn.disabled = true;
+            }
+            fetchList();
+        }
+
+        function handleSearchInput(event) {
+            currentSearchTerm = event.target.value.trim();
+            updateTableDisplay();
+        }
+
+        function toggleIndexSort() {
+            indexSortDirection = indexSortDirection === 'asc' ? 'desc' : 'asc';
+            updateIndexHeaderIndicator();
+            updateTableDisplay();
+        }
+
+        async function fetchTemplates(options = {}) {
+            const showProgress = Boolean(options.showProgress) && initialLoadingActive;
+            let success = false;
+            let errorMessage = '';
+            if (showProgress) {
+                setInitialProgressMessage('가격 템플릿을 불러오는 중...');
+            }
+            try {
+                const res = await fetch('/api/pricing/templates');
+                if (!res.ok) {
+                    throw new Error('가격 템플릿을 불러오지 못했습니다.');
+                }
+                const data = await res.json();
+                const templates = data.templates || [];
+                templateMap.clear();
+                templateSelect.innerHTML = '<option value="">가격 템플릿을 선택하세요</option>';
+                if (!templates.length) {
+                    templateSelect.innerHTML = '<option value="">등록된 템플릿이 없습니다</option>';
+                    templateSelect.disabled = true;
+                    if (submitBtn) {
+                        submitBtn.disabled = true;
+                    }
+                    renderTemplateDetails(
+                        null,
+                        '등록된 상품에서 KRW 가격 템플릿을 찾을 수 없습니다. 기존 상품의 가격 구성을 확인해주세요.',
+                    );
+                    return false;
+                }
+                templates.forEach((tpl) => {
+                    templateMap.set(tpl.id, tpl);
+                    const option = document.createElement('option');
+                    option.value = tpl.id;
+                    option.textContent = tpl.label;
+                    templateSelect.appendChild(option);
+                });
+                templateSelect.disabled = false;
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                }
+                renderTemplateDetails(null);
+                success = true;
+            } catch (error) {
+                errorMessage = error.message;
+                templateSelect.innerHTML = '<option value="">템플릿 로딩 실패</option>';
+                templateSelect.disabled = true;
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                }
+                renderTemplateDetails(null, error.message);
+            } finally {
+                if (showProgress) {
+                    finishInitialStep({ success, message: errorMessage || '가격 템플릿을 불러오지 못했습니다.' });
+                }
+            }
+            return success;
+        }
+
+        async function fetchList(token, options = {}) {
+            const showProgress = Boolean(options.showProgress) && initialLoadingActive;
+            let success = false;
+            let errorMessage = '';
+            const activeToken = typeof token === 'string' && token.length ? token : undefined;
+            currentToken = activeToken;
+            nextToken = undefined;
+            currentPageStartIndex = parseOffsetFromToken(activeToken);
+            if (showProgress) {
+                setInitialProgressMessage('등록된 상품을 불러오는 중...');
+            }
+            try {
+                const params = new URLSearchParams();
+                if (activeToken) {
+                    params.set('token', activeToken);
+                }
+                if (options.refresh) {
+                    params.set('refresh', 'true');
+                }
+                if (pageSize && Number.isFinite(pageSize) && pageSize > 0) {
+                    params.set('page_size', String(pageSize));
+                }
+                const query = params.toString();
+                const res = await fetch(`/api/inapp/list${query ? `?${query}` : ''}`);
+                if (!res.ok) {
+                    throw new Error('목록을 불러오지 못했습니다.');
+                }
+                const data = await res.json();
+                const items = data.items || [];
+                currentItems = items.map((item, index) => ({
+                    ...item,
+                    __index: currentPageStartIndex + index + 1,
+                }));
+                updateTableDisplay();
+                nextToken = data.nextPageToken || undefined;
+                if (nextBtn) {
+                    nextBtn.disabled = !nextToken;
+                }
+                if (prevBtn) {
+                    prevBtn.disabled = tokenStack.length === 0;
+                }
+                success = true;
+            } catch (error) {
+                errorMessage = error.message;
+                currentItems = [];
+                if (listEl) {
+                    listEl.innerHTML = '';
+                }
+                if (tableWrapper) {
+                    tableWrapper.hidden = true;
+                }
+                if (emptyEl) {
+                    emptyEl.hidden = false;
+                    emptyEl.textContent = error.message;
+                }
+                if (nextBtn) {
+                    nextBtn.disabled = true;
+                }
+                if (prevBtn) {
+                    prevBtn.disabled = tokenStack.length === 0;
+                }
+            } finally {
+                if (showProgress) {
+                    finishInitialStep({ success, message: errorMessage || '상품 목록을 불러오지 못했습니다.' });
+                }
+            }
+            return success;
+        }
+        nextBtn?.addEventListener('click', () => {
             if (!nextToken) return;
             tokenStack.push(currentToken || null);
             currentToken = nextToken;
             fetchList(currentToken);
         });
 
-        prevBtn.addEventListener('click', () => {
+        prevBtn?.addEventListener('click', () => {
             if (!tokenStack.length) return;
             const prev = tokenStack.pop();
             currentToken = prev || undefined;
             fetchList(currentToken);
         });
 
-        templateSelect.addEventListener('change', () => {
+        templateSelect?.addEventListener('change', () => {
             const template = templateMap.get(templateSelect.value);
             renderTemplateDetails(template);
         });
 
-        form.addEventListener('submit', async (event) => {
+        form?.addEventListener('submit', async (event) => {
             event.preventDefault();
             const formData = new FormData(form);
             statusEl.textContent = '';
@@ -1704,12 +2068,6 @@
                 return;
             }
 
-            const payload = {
-                sku,
-                default_language: defaultLanguage,
-                translations,
-            };
-
             if (!selectedTemplateId) {
                 statusEl.textContent = '가격 템플릿을 선택해주세요.';
                 return;
@@ -1718,7 +2076,13 @@
                 statusEl.textContent = '선택한 가격 템플릿 정보를 찾을 수 없습니다.';
                 return;
             }
-            payload.price_template_id = selectedTemplateId;
+
+            const payload = {
+                sku,
+                default_language: defaultLanguage,
+                translations,
+                price_template_id: selectedTemplateId,
+            };
 
             statusEl.textContent = '상품을 생성 중입니다...';
             try {
@@ -1747,14 +2111,41 @@
             }
         });
 
+        exportBtn?.addEventListener('click', handleExportCsv);
+        importPreviewBtn?.addEventListener('click', handleImportPreview);
+        importApplyBtn?.addEventListener('click', handleImportApply);
+        newTemplateBtn?.addEventListener('click', handleNewTemplateDownload);
+        newImportPreviewBtn?.addEventListener('click', handleNewImportPreview);
+        newImportApplyBtn?.addEventListener('click', handleNewImportApply);
+        pageSizeSelect?.addEventListener('change', handlePageSizeChange);
+        searchInput?.addEventListener('input', handleSearchInput);
+        indexHeader?.addEventListener('dblclick', toggleIndexSort);
+        indexHeader?.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                toggleIndexSort();
+            }
+        });
+
+        editCancelBtn?.addEventListener('click', () => {
+            closeEditDialog();
+        });
+        editDialog?.addEventListener('cancel', (event) => {
+            event.preventDefault();
+            closeEditDialog();
+        });
+        editForm?.addEventListener('submit', handleEditSubmit);
+
         async function initializeApp() {
             startInitialLoading(2);
             await fetchTemplates({ showProgress: true });
             await fetchList(undefined, { showProgress: true });
         }
 
-        renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } });
+        renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, importPreviewEl);
+        renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, newImportPreviewEl);
         renderTemplateDetails(null);
+        updateIndexHeaderIndicator();
         initializeApp();
     </script>
 </body>
