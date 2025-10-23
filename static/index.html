@@ -56,10 +56,13 @@
             background: rgba(255, 255, 255, 0.28);
         }
         nav.menu {
-            display: flex;
+            display: none;
             flex-wrap: wrap;
             gap: 0.75rem;
             justify-content: center;
+        }
+        nav.menu.is-active {
+            display: flex;
         }
         nav.menu button {
             padding: 0.65rem 1.25rem;
@@ -80,9 +83,6 @@
             background: #fff;
             color: #1a73e8;
             box-shadow: 0 10px 24px rgba(26, 115, 232, 0.24);
-        }
-        body[data-store="apple"] nav.menu {
-            display: none;
         }
         main {
             display: grid;
@@ -506,11 +506,16 @@
                 <button type="button" class="store-toggle-btn is-active" data-store="google" aria-selected="true">Google Play</button>
                 <button type="button" class="store-toggle-btn" data-store="apple" aria-selected="false">Apple App Store</button>
             </div>
-            <nav class="menu" aria-label="주요 메뉴">
+            <nav class="menu is-active" data-store="google" aria-label="Google Play 메뉴">
                 <button type="button" class="menu-button is-active" data-target="section-bulk-management">IAP 벌크 관리</button>
                 <button type="button" class="menu-button" data-target="section-bulk-create">신규 IAP 벌크 등록</button>
                 <button type="button" class="menu-button" data-target="section-single-create">신규 IAP 등록</button>
                 <button type="button" class="menu-button" data-target="section-product-management">등록된 상품 관리</button>
+            </nav>
+            <nav class="menu" data-store="apple" aria-label="Apple App Store 메뉴">
+                <button type="button" class="menu-button is-active" data-target="apple-section-product-list">인앱 상품 목록</button>
+                <button type="button" class="menu-button" data-target="apple-section-form">인앱 상품 등록/수정</button>
+                <button type="button" class="menu-button" data-target="apple-section-import-preview">CSV 미리보기</button>
             </nav>
         </div>
     </header>
@@ -710,7 +715,7 @@
         </dialog>
         </section>
         <section class="store-pane" data-store="apple" hidden>
-            <section class="app-section">
+            <section id="apple-section-product-list" class="app-section">
                 <div>
                     <h2>Apple App Store 인앱상품 목록</h2>
                     <p class="hint">App Store Connect API를 통해 인앱 상품을 조회하고 CSV로 내보내거나 일괄 업데이트할 수 있습니다.</p>
@@ -745,7 +750,7 @@
                 </div>
                 <div id="apple-empty-state" class="empty" hidden>등록된 Apple 인앱 상품이 없습니다.</div>
             </section>
-            <section class="app-section">
+            <section id="apple-section-form" class="app-section" hidden>
                 <div>
                     <h2>Apple 인앱 상품 등록/수정</h2>
                     <p class="hint">필수 정보와 현지화 정보를 입력한 뒤 저장하면 새로운 인앱 상품을 생성하거나 기존 상품을 업데이트합니다.</p>
@@ -800,7 +805,7 @@
                     <div id="apple-form-status" class="status"></div>
                 </form>
             </section>
-            <section class="app-section">
+            <section id="apple-section-import-preview" class="app-section" hidden>
                 <h2>CSV 미리보기</h2>
                 <div id="apple-import-preview"></div>
             </section>
@@ -808,50 +813,65 @@
     </main>
     <script>
         const storeToggleButtons = document.querySelectorAll('.store-toggle-btn');
-        const storePanes = document.querySelectorAll('.store-pane');
-        let activeStore = 'google';
-        document.body.dataset.store = activeStore;
-        storePanes.forEach((pane) => {
-            if (pane.dataset.store && pane.dataset.store !== activeStore) {
-                pane.hidden = true;
+        const storePanes = new Map();
+        document.querySelectorAll('.store-pane').forEach((pane) => {
+            const store = pane.dataset.store;
+            if (store) {
+                storePanes.set(store, pane);
             }
         });
+        let activeStore = 'google';
+        document.body.dataset.store = activeStore;
 
-        const SECTION_IDS = {
-            bulkManagement: 'section-bulk-management',
-            bulkCreate: 'section-bulk-create',
-            singleCreate: 'section-single-create',
-            productManagement: 'section-product-management',
+        const storeConfigs = {
+            google: {
+                defaultSection: 'section-bulk-management',
+                menu: document.querySelector('nav.menu[data-store="google"]'),
+                pane: storePanes.get('google'),
+                sections: new Map([
+                    ['section-bulk-management', document.getElementById('section-bulk-management')],
+                    ['section-bulk-create', document.getElementById('section-bulk-create')],
+                    ['section-single-create', document.getElementById('section-single-create')],
+                    ['section-product-management', document.getElementById('section-product-management')],
+                ]),
+            },
+            apple: {
+                defaultSection: 'apple-section-product-list',
+                menu: document.querySelector('nav.menu[data-store="apple"]'),
+                pane: storePanes.get('apple'),
+                sections: new Map([
+                    ['apple-section-product-list', document.getElementById('apple-section-product-list')],
+                    ['apple-section-form', document.getElementById('apple-section-form')],
+                    ['apple-section-import-preview', document.getElementById('apple-section-import-preview')],
+                ]),
+            },
         };
-        const navButtons = document.querySelectorAll('.menu-button');
-        const sectionMap = new Map([
-            [SECTION_IDS.bulkManagement, document.getElementById(SECTION_IDS.bulkManagement)],
-            [SECTION_IDS.bulkCreate, document.getElementById(SECTION_IDS.bulkCreate)],
-            [SECTION_IDS.singleCreate, document.getElementById(SECTION_IDS.singleCreate)],
-            [SECTION_IDS.productManagement, document.getElementById(SECTION_IDS.productManagement)],
-        ]);
-        let activeSectionId = SECTION_IDS.bulkManagement;
 
-        function setActiveSection(id) {
-            if (!sectionMap.has(id)) {
+        const activeSections = {};
+        Object.entries(storeConfigs).forEach(([store, config]) => {
+            activeSections[store] = config.defaultSection;
+        });
+
+        function setActiveSection(store, id) {
+            const config = storeConfigs[store];
+            if (!config || !config.sections.has(id)) {
                 return;
             }
-            activeSectionId = id;
-            sectionMap.forEach((section, key) => {
+            activeSections[store] = id;
+            config.sections.forEach((section, key) => {
                 if (!section) return;
                 section.hidden = key !== id;
             });
-            navButtons.forEach((button) => {
-                if (button.dataset.target === id) {
-                    button.classList.add('is-active');
-                } else {
-                    button.classList.remove('is-active');
-                }
-            });
+            if (config.menuButtons) {
+                config.menuButtons.forEach((button) => {
+                    const isActive = button.dataset.target === id;
+                    button.classList.toggle('is-active', isActive);
+                });
+            }
         }
 
         function setActiveStore(store) {
-            if (!store || activeStore === store) {
+            if (!store || !storeConfigs[store]) {
                 return;
             }
             activeStore = store;
@@ -861,25 +881,34 @@
                 button.classList.toggle('is-active', isActive);
                 button.setAttribute('aria-selected', isActive ? 'true' : 'false');
             });
-            storePanes.forEach((pane) => {
-                if (!pane.dataset.store) return;
-                pane.hidden = pane.dataset.store !== store;
+            Object.entries(storeConfigs).forEach(([key, config]) => {
+                if (config.pane) {
+                    config.pane.hidden = key !== store;
+                }
+                if (config.menu) {
+                    config.menu.classList.toggle('is-active', key === store);
+                }
             });
-            if (store === 'google') {
-                setActiveSection(activeSectionId);
-            } else if (store === 'apple') {
+            setActiveSection(store, activeSections[store]);
+            if (store === 'apple') {
                 ensureAppleInitialized();
             }
         }
 
-        navButtons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const target = button.dataset.target;
-                setActiveSection(target);
+        Object.entries(storeConfigs).forEach(([store, config]) => {
+            config.menuButtons = config.menu
+                ? Array.from(config.menu.querySelectorAll('.menu-button'))
+                : [];
+            config.menuButtons.forEach((button) => {
+                button.addEventListener('click', () => {
+                    const target = button.dataset.target;
+                    if (target) {
+                        setActiveSection(store, target);
+                    }
+                });
             });
+            setActiveSection(store, activeSections[store]);
         });
-
-        setActiveSection(activeSectionId);
 
         const tableWrapper = document.getElementById('iap-table-wrapper');
         const listEl = document.getElementById('iap-table-body');
