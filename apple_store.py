@@ -6,6 +6,7 @@ import base64
 import binascii
 import datetime as _dt
 import hashlib
+import json
 import logging
 import os
 import time
@@ -39,23 +40,79 @@ def _encode_jwt(payload: Dict[str, Any], private_key: str, headers: Dict[str, st
             "PyJWT 라이브러리가 설치되어 있지 않습니다. requirements.txt의 의존성을 설치해 주세요."
         ) from _jwt_import_error
 
-    if hasattr(_jwt_module, "encode"):
-        token = _jwt_module.encode(
-            payload, private_key, algorithm="ES256", headers=headers
-        )
-    elif hasattr(_jwt_module, "JWT") and hasattr(_jwt_module, "jwk_from_pem"):
-        jwt_instance = _jwt_module.JWT()
-        jwk_key = _jwt_module.jwk_from_pem(private_key.encode("utf-8"))
-        token = jwt_instance.encode(payload, jwk_key, alg="ES256", headers=headers)
-    else:
+    encode_func = getattr(_jwt_module, "encode", None)
+    if callable(encode_func):
+        try:
+            token = encode_func(payload, private_key, algorithm="ES256", headers=headers)
+        except Exception as exc:  # pragma: no cover - delegates to dependency
+            raise AppleStoreConfigError(
+                "PyJWT로 JWT를 생성하는 데 실패했습니다. 비공개 키가 올바른지 확인해 주세요."
+            ) from exc
+
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
+        return token
+
+    logger.warning(
+        "PyJWT encode API를 사용할 수 없어 cryptography 기반 JWT 생성을 시도합니다."
+    )
+    return _encode_jwt_with_cryptography(payload, private_key, headers)
+
+
+def _encode_jwt_with_cryptography(
+    payload: Dict[str, Any], private_key: str, headers: Dict[str, str]
+) -> str:
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    except ImportError as exc:  # pragma: no cover - optional dependency
         raise AppleStoreConfigError(
-            "설치된 'jwt' 패키지가 PyJWT가 아니어서 토큰을 생성할 수 없습니다. "
-            "'pip uninstall jwt' 후 'pip install PyJWT'를 실행해 주세요."
+            "PyJWT 대신 다른 'jwt' 패키지를 사용하려면 'cryptography' 패키지가 필요합니다. "
+            "'pip install PyJWT' 또는 'pip install cryptography'를 실행해 주세요."
+        ) from exc
+
+    try:
+        private_key_obj = serialization.load_pem_private_key(
+            private_key.encode("utf-8"), password=None
+        )
+    except (TypeError, ValueError) as exc:
+        raise AppleStoreConfigError(
+            "Apple API 비공개 키를 읽을 수 없습니다. 키 파일이 손상되지 않았는지 확인해 주세요."
+        ) from exc
+
+    if not isinstance(private_key_obj, ec.EllipticCurvePrivateKey):
+        raise AppleStoreConfigError(
+            "Apple API 비공개 키는 ES256(ECDSA, P-256) 키여야 합니다."
         )
 
-    if isinstance(token, bytes):
-        token = token.decode("utf-8")
-    return token
+    curve_name = getattr(private_key_obj.curve, "name", "")
+    if curve_name not in {"secp256r1", "prime256v1"}:
+        raise AppleStoreConfigError(
+            "Apple API 비공개 키는 P-256 곡선을 사용해야 합니다."
+        )
+
+    header: Dict[str, Any] = {"alg": "ES256", **headers}
+    header.setdefault("typ", "JWT")
+
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+    signing_segments = []
+    for segment in (header, payload):
+        json_segment = json.dumps(segment, separators=(",", ":"), ensure_ascii=False)
+        signing_segments.append(_b64url(json_segment.encode("utf-8")))
+
+    signing_input = ".".join(signing_segments)
+
+    signature_der = private_key_obj.sign(
+        signing_input.encode("utf-8"), ec.ECDSA(hashes.SHA256())
+    )
+    r, s = decode_dss_signature(signature_der)
+    size = (private_key_obj.key_size + 7) // 8
+    signature = r.to_bytes(size, "big") + s.to_bytes(size, "big")
+    signing_segments.append(_b64url(signature))
+    return ".".join(signing_segments)
 
 
 def _require_env(name: str) -> str:
