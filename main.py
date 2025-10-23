@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from dotenv import load_dotenv
 
 from apple_store import (
+    AppleStoreConfigError,
     create_inapp_purchase as create_apple_inapp_purchase,
     delete_inapp_purchase as delete_apple_inapp_purchase,
     get_all_inapp_purchases,
@@ -1348,6 +1349,9 @@ async def api_apple_list_inapp(
         return {"items": items, "nextPageToken": next_token}
     except HTTPException:
         raise
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to list Apple in-app purchases")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1403,6 +1407,9 @@ async def api_apple_export_inapp() -> StreamingResponse:
         return StreamingResponse(iter([csv_bytes]), media_type="text/csv", headers=headers)
     except HTTPException:
         raise
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to export Apple in-app purchases")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1413,6 +1420,9 @@ async def api_apple_price_tiers(territory: str = Query(default="KOR", min_length
     try:
         tiers = list_apple_price_tiers(territory)
         return {"tiers": tiers}
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to load Apple price tiers")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1438,6 +1448,9 @@ async def api_apple_create_inapp(payload: AppleCreateInAppRequest):
         raise
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to create Apple in-app purchase")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1486,6 +1499,9 @@ async def api_apple_update_inapp(product_id: str, payload: AppleUpdateInAppReque
         raise
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to update Apple in-app purchase")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1503,6 +1519,9 @@ async def api_apple_delete_inapp(product_id: str):
         return {"status": "ok"}
     except HTTPException:
         raise
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to delete Apple in-app purchase")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1526,6 +1545,9 @@ async def api_apple_import_preview(file: UploadFile = File(...)):
             for item in existing_products_raw
             if item.get("productId") or item.get("sku")
         }
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to load Apple in-app purchases for preview")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1608,6 +1630,9 @@ async def api_apple_import_apply(request: AppleImportApplyRequest):
         raise
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to apply Apple import operations")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
