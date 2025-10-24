@@ -47,6 +47,9 @@ _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
 
+_INAPP_V2_ID_CACHE: Dict[str, Optional[str]] = {}
+_INAPP_V2_ID_BY_PRODUCT_ID: Dict[str, Optional[str]] = {}
+
 
 _PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
 
@@ -438,9 +441,18 @@ def list_inapp_purchases(
 
             items: List[Dict[str, Any]] = []
             for record in response.get("data", []):
-                items.append(
-                    _canonicalize_record(record, localization_map, prices_map)
+                item = _canonicalize_record(
+                    record, localization_map, prices_map
                 )
+                resolved_id, resolved_type = _resolve_inapp_v2_identifier(
+                    item.get("id"),
+                    item.get("resourceType", "inAppPurchases"),
+                    item.get("productId"),
+                )
+                if resolved_id:
+                    item["id"] = resolved_id
+                item["resourceType"] = resolved_type
+                items.append(item)
 
             next_cursor = _extract_cursor(response.get("links", {}).get("next"))
             return items, next_cursor
@@ -468,8 +480,14 @@ def list_inapp_purchases(
     items = []
     for record in response.get("data", []):
         item = _canonicalize_record(record, {}, {})
-        inapp_id = item.get("id")
-        resource_type = item.get("resourceType", "inAppPurchases")
+        inapp_id, resource_type = _resolve_inapp_v2_identifier(
+            item.get("id"),
+            item.get("resourceType", "inAppPurchases"),
+            item.get("productId"),
+        )
+        if inapp_id:
+            item["id"] = inapp_id
+        item["resourceType"] = resource_type
         item["localizations"] = _fetch_inapp_localizations(
             inapp_id, resource_type
         )
@@ -530,6 +548,19 @@ def _parse_price_entry(entry: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
     }
 
 
+def _extract_relationship_id(data: object) -> Optional[str]:
+    if isinstance(data, dict):
+        candidate = data.get("id")
+        if isinstance(candidate, str):
+            return candidate
+    elif isinstance(data, list):
+        for entry in data:
+            candidate = _extract_relationship_id(entry)
+            if candidate:
+                return candidate
+    return None
+
+
 def _canonicalize_record(
     record: Dict[str, Any],
     localization_map: Dict[str, Dict[str, Any]],
@@ -564,10 +595,20 @@ def _canonicalize_record(
         if parsed_price:
             prices.append(parsed_price)
 
+    resolved_id = record.get("id", "")
+    resolved_resource_type = record.get("type", "inAppPurchases")
+    for relationship_key in ("inAppPurchaseV2", "inAppPurchase"):
+        relationship = relationships.get(relationship_key) or {}
+        candidate = _extract_relationship_id(relationship.get("data"))
+        if isinstance(candidate, str) and candidate.isdigit():
+            resolved_id = candidate
+            resolved_resource_type = "inAppPurchasesV2"
+            break
+
     product_id = attributes.get("productId", "")
     return {
-        "id": record.get("id", ""),
-        "resourceType": record.get("type", "inAppPurchases"),
+        "id": resolved_id,
+        "resourceType": resolved_resource_type,
         "sku": product_id,
         "productId": product_id,
         "referenceName": attributes.get("referenceName", ""),
@@ -588,9 +629,98 @@ def _normalize_localization_entries(entries: object) -> List[Dict[str, Any]]:
     return []
 
 
+def _cache_v2_id(original_id: str, product_id: Optional[str], resolved_id: Optional[str]) -> None:
+    _INAPP_V2_ID_CACHE[original_id] = resolved_id
+    if product_id:
+        _INAPP_V2_ID_BY_PRODUCT_ID[product_id] = resolved_id
+
+
+def _resolve_inapp_v2_identifier(
+    inapp_id: Optional[str],
+    resource_type: str,
+    product_id: Optional[str] = None,
+) -> Tuple[Optional[str], str]:
+    if not inapp_id:
+        return None, resource_type
+
+    if inapp_id.isdigit():
+        return inapp_id, "inAppPurchasesV2"
+
+    if resource_type == "inAppPurchasesV2":
+        return inapp_id, resource_type
+
+    cached = _INAPP_V2_ID_CACHE.get(inapp_id)
+    if cached is not None:
+        return cached, "inAppPurchasesV2" if cached else resource_type
+
+    if product_id:
+        cached_product = _INAPP_V2_ID_BY_PRODUCT_ID.get(product_id)
+        if cached_product is not None:
+            _cache_v2_id(inapp_id, product_id, cached_product)
+            return cached_product, "inAppPurchasesV2" if cached_product else resource_type
+
+    relationship_paths = [
+        f"/inAppPurchases/{inapp_id}/relationships/inAppPurchaseV2",
+        f"/inAppPurchases/{inapp_id}/relationships/inAppPurchase",
+    ]
+
+    for rel_path in relationship_paths:
+        try:
+            response = _request("GET", rel_path)
+        except RuntimeError as exc:
+            if (
+                _is_path_error(exc)
+                or _is_parameter_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+                or _is_not_found_error(exc)
+            ):
+                continue
+            raise
+
+        candidate = _extract_relationship_id(response.get("data"))
+        if isinstance(candidate, str) and candidate.isdigit():
+            _cache_v2_id(inapp_id, product_id, candidate)
+            return candidate, "inAppPurchasesV2"
+
+    if product_id:
+        params = {"filter[productId]": product_id, "limit": "1"}
+        try:
+            response = _request("GET", "/inAppPurchasesV2", params=params)
+        except RuntimeError as exc:
+            if (
+                _is_path_error(exc)
+                or _is_parameter_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+                or _is_not_found_error(exc)
+            ):
+                _cache_v2_id(inapp_id, product_id, None)
+                return inapp_id, resource_type
+            raise
+
+        entries = response.get("data")
+        if isinstance(entries, dict):
+            entries = [entries]
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                candidate = entry.get("id")
+                if isinstance(candidate, str) and candidate.isdigit():
+                    _cache_v2_id(inapp_id, product_id, candidate)
+                    return candidate, "inAppPurchasesV2"
+
+    _cache_v2_id(inapp_id, product_id, None)
+    return inapp_id, resource_type
+
+
 def _load_localization_entries_via_filter(
     inapp_id: str, resource_type: str
 ) -> List[Dict[str, Any]]:
+    if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
+        resource_type = "inAppPurchasesV2"
+
     filter_keys = ["inAppPurchase"]
     if resource_type == "inAppPurchasesV2":
         filter_keys = ["inAppPurchaseV2", "inAppPurchase"]
@@ -701,6 +831,9 @@ def _load_localization_entries_v2(
 def _list_localization_entries(
     inapp_id: str, resource_type: str
 ) -> List[Dict[str, Any]]:
+    if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
+        resource_type = "inAppPurchasesV2"
+
     candidates = [
         f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
     ]
@@ -740,6 +873,9 @@ def _fetch_inapp_localizations(
     if not inapp_id:
         return {}
 
+    if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
+        resource_type = "inAppPurchasesV2"
+
     result: Dict[str, Dict[str, str]] = {}
     for entry in _list_localization_entries(inapp_id, resource_type):
         attributes = entry.get("attributes") or {}
@@ -760,6 +896,9 @@ def _fetch_inapp_prices(
 
     if not inapp_id:
         return []
+
+    if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
+        resource_type = "inAppPurchasesV2"
 
     if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
         return []
@@ -798,37 +937,90 @@ def _fetch_inapp_prices(
 
 
 def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
-    try:
-        response = _request(
-            "GET",
-            f"/inAppPurchases/{inapp_id}",
-            params={"include": "inAppPurchaseLocalizations,inAppPurchasePrices"},
-        )
-    except RuntimeError as exc:
-        if not _is_parameter_error(exc):
-            raise
-        logger.info(
-            "Apple API rejected include when fetching in-app purchase %s; "
-            "falling back to compatibility mode.",
-            inapp_id,
-        )
-    else:
-        data = response.get("data", {})
-        included = response.get("included", [])
-        localization_map = _index_included(
-            included, "inAppPurchaseLocalizations"
-        )
-        prices_map = _index_included(included, "inAppPurchasePrices")
-        result = _canonicalize_record(data, localization_map, prices_map)
-        if result:
-            return result
+    resolved_id, resolved_type = _resolve_inapp_v2_identifier(
+        inapp_id, "inAppPurchases"
+    )
+    lookup_id = resolved_id or inapp_id
+    resource_type = (
+        resolved_type
+        if resolved_id
+        else ("inAppPurchasesV2" if lookup_id.isdigit() else "inAppPurchases")
+    )
 
-    base = _request("GET", f"/inAppPurchases/{inapp_id}")
-    record = _canonicalize_record(base.get("data", {}), {}, {})
-    resource_type = record.get("resourceType", "inAppPurchases")
-    record["localizations"] = _fetch_inapp_localizations(inapp_id, resource_type)
-    record["prices"] = _fetch_inapp_prices(inapp_id, resource_type)
-    return record
+    path_prefixes = [
+        "inAppPurchasesV2",
+        "inAppPurchases",
+    ]
+    if resource_type != "inAppPurchasesV2":
+        path_prefixes = ["inAppPurchases", "inAppPurchasesV2"]
+
+    last_error: Optional[RuntimeError] = None
+    for prefix in path_prefixes:
+        path = f"/{prefix}/{lookup_id}"
+        try:
+            response = _request(
+                "GET",
+                path,
+                params={
+                    "include": "inAppPurchaseLocalizations,inAppPurchasePrices"
+                },
+            )
+        except RuntimeError as exc:
+            if _is_parameter_error(exc):
+                logger.info(
+                    "Apple API rejected include when fetching in-app purchase %s via %s; "
+                    "falling back to compatibility mode.",
+                    lookup_id,
+                    path,
+                )
+            elif (
+                _is_path_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+                or _is_not_found_error(exc)
+            ):
+                last_error = exc
+                continue
+            else:
+                raise
+        else:
+            data = response.get("data", {})
+            included = response.get("included", [])
+            localization_map = _index_included(
+                included, "inAppPurchaseLocalizations"
+            )
+            prices_map = _index_included(included, "inAppPurchasePrices")
+            result = _canonicalize_record(data, localization_map, prices_map)
+            if result:
+                return result
+
+        try:
+            base = _request("GET", path)
+        except RuntimeError as exc:
+            if (
+                _is_path_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+                or _is_not_found_error(exc)
+            ):
+                last_error = exc
+                continue
+            else:
+                raise
+
+        record = _canonicalize_record(base.get("data", {}), {}, {})
+        resource_type = record.get("resourceType", "inAppPurchases")
+        record["localizations"] = _fetch_inapp_localizations(
+            lookup_id, resource_type
+        )
+        record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+        return record
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(
+        "Apple API에서 인앱 상품 정보를 가져오지 못했습니다. 다시 시도해 주세요."
+    )
 
 
 def _format_iso8601(date: Optional[str]) -> Optional[str]:
