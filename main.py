@@ -32,6 +32,7 @@ from apple_store import (
     create_inapp_purchase as create_apple_inapp_purchase,
     delete_inapp_purchase as delete_apple_inapp_purchase,
     get_all_inapp_purchases,
+    get_fixed_price_territories,
     list_price_tiers as list_apple_price_tiers,
     update_inapp_purchase as update_apple_inapp_purchase,
 )
@@ -68,6 +69,28 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_STORE = "google"
 APPLE_STORE = "apple"
+
+
+def _parse_locale_list(value: str | None) -> List[str]:
+    if not value:
+        return []
+    locales: List[str] = []
+    for token in value.split(","):
+        candidate = token.strip()
+        if not candidate:
+            continue
+        if candidate not in locales:
+            locales.append(candidate)
+    return locales
+
+
+APPLE_LOCALIZATION_LOCALES = _parse_locale_list(os.getenv("APPLE_LOCALIZATION_LOCALES"))
+if not APPLE_LOCALIZATION_LOCALES:
+    APPLE_LOCALIZATION_LOCALES = ["en-GB"]
+elif "en-GB" not in APPLE_LOCALIZATION_LOCALES:
+    APPLE_LOCALIZATION_LOCALES.insert(0, "en-GB")
+
+APPLE_DEFAULT_LOCALIZATION_LOCALE = APPLE_LOCALIZATION_LOCALES[0]
 
 app = FastAPI(title="iap-management-tool")
 
@@ -1505,6 +1528,19 @@ async def api_import_apply(request: ImportApplyRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {"status": "ok", "summary": results}
+
+
+@app.get("/api/apple/config")
+async def api_apple_config():
+    return {
+        "localization": {
+            "defaultLocale": APPLE_DEFAULT_LOCALIZATION_LOCALE,
+            "locales": list(APPLE_LOCALIZATION_LOCALES),
+        },
+        "pricing": {
+            "fixedPriceTerritories": list(get_fixed_price_territories()),
+        },
+    }
 
 
 @app.get("/api/apple/inapp/list")

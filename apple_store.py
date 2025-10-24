@@ -51,6 +51,30 @@ _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
 _PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
 
 
+def _parse_territory_list(value: Optional[str]) -> List[str]:
+    if value is None:
+        return []
+    territories: List[str] = []
+    for token in re.split(r"[,\s]+", value):
+        candidate = token.strip().upper()
+        if not candidate:
+            continue
+        if candidate not in territories:
+            territories.append(candidate)
+    return territories
+
+
+_DEFAULT_FIXED_PRICE_TERRITORIES = ("TWN", "MAC", "HKG")
+_FIXED_PRICE_TERRITORIES: Tuple[str, ...] = tuple(
+    _parse_territory_list(os.getenv("APPLE_FIXED_PRICE_TERRITORIES"))
+    or _DEFAULT_FIXED_PRICE_TERRITORIES
+)
+
+
+def get_fixed_price_territories() -> Tuple[str, ...]:
+    return _FIXED_PRICE_TERRITORIES
+
+
 class AppleStoreConfigError(RuntimeError):
     """Raised when required Apple configuration is missing."""
 
@@ -1114,27 +1138,45 @@ def _replace_price_schedule(
     if not price_tier:
         return
 
-    price_point = _get_price_point(price_tier, territory)
-    attributes = price_point.get("attributes") or {}
-    start_date = _format_iso8601(attributes.get("startDate"))
-    payload = {
-        "data": {
-            "type": "inAppPurchasePrices",
-            "attributes": {"startDate": start_date},
-            "relationships": {
-                "inAppPurchase": {
-                    "data": {"type": "inAppPurchases", "id": inapp_id}
+    territories: List[str] = [territory.upper()]
+    for fixed_territory in _FIXED_PRICE_TERRITORIES:
+        normalized = fixed_territory.upper()
+        if normalized and normalized not in territories:
+            territories.append(normalized)
+
+    for current_territory in territories:
+        try:
+            price_point = _get_price_point(price_tier, current_territory)
+        except RuntimeError as exc:
+            if current_territory == territory.upper():
+                raise
+            logger.warning(
+                "Failed to load fixed price point for territory %s: %s",
+                current_territory,
+                exc,
+            )
+            continue
+
+        attributes = price_point.get("attributes") or {}
+        start_date = _format_iso8601(attributes.get("startDate"))
+        payload = {
+            "data": {
+                "type": "inAppPurchasePrices",
+                "attributes": {"startDate": start_date},
+                "relationships": {
+                    "inAppPurchase": {
+                        "data": {"type": "inAppPurchases", "id": inapp_id}
+                    },
+                    "inAppPurchasePricePoint": {
+                        "data": {
+                            "type": "inAppPurchasePricePoints",
+                            "id": price_point.get("id"),
+                        }
+                    },
                 },
-                "inAppPurchasePricePoint": {
-                    "data": {
-                        "type": "inAppPurchasePricePoints",
-                        "id": price_point.get("id"),
-                    }
-                },
-            },
+            }
         }
-    }
-    _request("POST", "/inAppPurchasePrices", json=payload)
+        _request("POST", "/inAppPurchasePrices", json=payload)
 
 
 def create_inapp_purchase(

@@ -26,6 +26,10 @@
      APP_STORE_ISSUER_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
      APP_STORE_KEY_ID=ABC123XYZ
      APP_STORE_PRIVATE_KEY_PATH=./AuthKey_ABC123XYZ.p8
+     # (선택) 환율 변동과 무관하게 고정할 판매 지역 코드 목록
+     APPLE_FIXED_PRICE_TERRITORIES=TWN,MAC,HKG
+     # (선택) 기본으로 편집할 현지화 언어 코드 목록 (첫 번째 항목이 기본값)
+     APPLE_LOCALIZATION_LOCALES=en-GB,zh-Hant,ko-KR
      ```
 3. `.gitignore`에 의해 민감한 키 파일은 커밋되지 않습니다.
 
