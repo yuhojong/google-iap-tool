@@ -2379,6 +2379,16 @@
         const appleResetBtn = document.getElementById('apple-reset-btn');
         const appleImportPreviewEl = document.getElementById('apple-import-preview');
 
+        const appleConfig = {
+            localization: {
+                defaultLocale: 'en-GB',
+                locales: ['en-GB'],
+            },
+            pricing: {
+                fixedPriceTerritories: [],
+            },
+        };
+
         const appleState = {
             initialized: false,
             items: [],
@@ -2386,6 +2396,73 @@
             priceTiers: [],
         };
         let appleImportPreviewData = null;
+
+        function getAppleDefaultLocale() {
+            return appleConfig.localization?.defaultLocale || 'en-GB';
+        }
+
+        function getAppleConfiguredLocales() {
+            const locales = appleConfig.localization?.locales;
+            if (Array.isArray(locales) && locales.length) {
+                const unique = [];
+                locales.forEach((locale) => {
+                    if (typeof locale !== 'string') return;
+                    const trimmed = locale.trim();
+                    if (!trimmed) return;
+                    if (!unique.includes(trimmed)) {
+                        unique.push(trimmed);
+                    }
+                });
+                if (unique.length) {
+                    const defaultLocale = getAppleDefaultLocale();
+                    const index = unique.indexOf(defaultLocale);
+                    if (index > 0) {
+                        unique.splice(index, 1);
+                        unique.unshift(defaultLocale);
+                    } else if (index === -1) {
+                        unique.unshift(defaultLocale);
+                    }
+                    return unique;
+                }
+            }
+            return [getAppleDefaultLocale()];
+        }
+
+        async function loadAppleConfig() {
+            try {
+                const res = await fetch('/api/apple/config');
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                const localization = data.localization || {};
+                const locales = Array.isArray(localization.locales) ? localization.locales : [];
+                const defaultLocale = typeof localization.defaultLocale === 'string' && localization.defaultLocale.trim()
+                    ? localization.defaultLocale.trim()
+                    : getAppleDefaultLocale();
+                const normalizedLocales = locales
+                    .map((locale) => (typeof locale === 'string' ? locale.trim() : ''))
+                    .filter((locale) => locale);
+                if (!normalizedLocales.includes(defaultLocale)) {
+                    normalizedLocales.unshift(defaultLocale);
+                }
+                appleConfig.localization = {
+                    defaultLocale,
+                    locales: normalizedLocales,
+                };
+                const pricing = data.pricing || {};
+                const fixedTerritories = Array.isArray(pricing.fixedPriceTerritories)
+                    ? pricing.fixedPriceTerritories
+                          .map((territory) => (typeof territory === 'string' ? territory.trim() : ''))
+                          .filter((territory) => territory)
+                    : [];
+                appleConfig.pricing = {
+                    fixedPriceTerritories: Array.from(new Set(fixedTerritories)),
+                };
+            } catch (error) {
+                console.warn('Failed to load Apple configuration:', error);
+            }
+        }
 
         function populateApplePriceTierOptions(tiers) {
             if (!applePriceTierSelect) return;
@@ -2403,7 +2480,7 @@
             }
         }
 
-        function addAppleLocalization(locale = 'ko-KR', name = '', description = '') {
+        function addAppleLocalization(locale = getAppleDefaultLocale(), name = '', description = '') {
             if (!appleLocalizationContainer) return;
             const card = document.createElement('div');
             card.className = 'localization-card';
@@ -2481,7 +2558,10 @@
             if (appleReviewNoteInput) appleReviewNoteInput.value = '';
             if (appleLocalizationContainer) {
                 appleLocalizationContainer.innerHTML = '';
-                addAppleLocalization('ko-KR');
+                const locales = getAppleConfiguredLocales();
+                locales.forEach((locale) => {
+                    addAppleLocalization(locale);
+                });
             }
             if (appleFormStatus) appleFormStatus.textContent = '';
             if (appleSubmitBtn) appleSubmitBtn.textContent = '저장';
@@ -2794,11 +2874,22 @@
                 const localizations = item.localizations || {};
                 const entries = Object.entries(localizations);
                 if (entries.length) {
+                    const seenLocales = new Set();
                     entries.forEach(([locale, value]) => {
                         addAppleLocalization(locale, value?.name || '', value?.description || '');
+                        if (locale) {
+                            seenLocales.add(locale);
+                        }
+                    });
+                    getAppleConfiguredLocales().forEach((locale) => {
+                        if (!seenLocales.has(locale)) {
+                            addAppleLocalization(locale);
+                        }
                     });
                 } else {
-                    addAppleLocalization('ko-KR');
+                    getAppleConfiguredLocales().forEach((locale) => {
+                        addAppleLocalization(locale);
+                    });
                 }
             }
             if (appleFormStatus) appleFormStatus.textContent = '';
@@ -2924,6 +3015,9 @@
             resetAppleForm();
             loadApplePriceTiers(appleBaseTerritoryInput?.value || 'KOR', { quiet: true });
             fetchAppleList({ refresh: true });
+            loadAppleConfig().then(() => {
+                resetAppleForm();
+            });
         }
 
         appleRefreshBtn?.addEventListener('click', () => fetchAppleList({ refresh: true }));
