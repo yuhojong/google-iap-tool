@@ -54,6 +54,10 @@ class AppleStoreConfigError(RuntimeError):
     """Raised when required Apple configuration is missing."""
 
 
+class AppleStorePermissionError(AppleStoreConfigError):
+    """Raised when the App Store Connect API denies an operation."""
+
+
 def _encode_jwt(payload: Dict[str, Any], private_key: str, headers: Dict[str, str]) -> str:
     if _jwt_module is None:
         raise AppleStoreConfigError(
@@ -345,6 +349,13 @@ def _is_forbidden_noop_error(exc: Exception) -> bool:
     return "no allowed operations" in message.lower()
 
 
+def _is_forbidden_error(exc: Exception) -> bool:
+    message = str(exc)
+    if not message:
+        return False
+    return "FORBIDDEN_ERROR" in message
+
+
 def list_inapp_purchases(
     cursor: Optional[str] = None, limit: int = 200
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -528,28 +539,77 @@ def _canonicalize_record(
     }
 
 
-def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, str]]:
-    if not inapp_id:
-        return {}
+def _normalize_localization_entries(entries: object) -> List[Dict[str, Any]]:
+    if isinstance(entries, list):
+        return [entry for entry in entries if isinstance(entry, dict)]
+    if isinstance(entries, dict):
+        return [entries]
+    return []
 
+
+def _load_localization_entries_via_include(inapp_id: str) -> List[Dict[str, Any]]:
+    response = _request(
+        "GET",
+        f"/inAppPurchases/{inapp_id}",
+        params={"include": "inAppPurchaseLocalizations"},
+    )
+    data = response.get("data") or {}
+    relationships = data.get("relationships") or {}
+    localization_rel = relationships.get("inAppPurchaseLocalizations") or {}
+    localization_ids = [
+        entry.get("id")
+        for entry in localization_rel.get("data", []) or []
+        if isinstance(entry, dict) and entry.get("id")
+    ]
+
+    included_map = _index_included(
+        response.get("included", []), "inAppPurchaseLocalizations"
+    )
+
+    entries: List[Dict[str, Any]] = []
+    for loc_id in localization_ids:
+        record: Optional[Dict[str, Any]] = included_map.get(loc_id)
+        if record is None:
+            try:
+                record_response = _request(
+                    "GET", f"/inAppPurchaseLocalizations/{loc_id}"
+                )
+            except RuntimeError as exc:
+                if _is_forbidden_error(exc):
+                    logger.warning(
+                        "Apple API denied direct localization lookup for %s", loc_id
+                    )
+                    continue
+                raise
+            record = record_response.get("data") if isinstance(record_response, dict) else None
+        if isinstance(record, dict):
+            entries.append(record)
+    return entries
+
+
+def _list_localization_entries(inapp_id: str) -> List[Dict[str, Any]]:
     try:
         response = _request(
             "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
         )
     except RuntimeError as exc:
-        if not _is_path_error(exc):
+        if not (_is_path_error(exc) or _is_forbidden_noop_error(exc)):
             raise
         logger.info(
             "Apple API reported missing in-app localization relationship; "
-            "retrying with direct filter lookup.",
+            "retrying with included localization fetch.",
         )
-        response = _request(
-            "GET",
-            "/inAppPurchaseLocalizations",
-            params={"filter[inAppPurchase]": inapp_id},
-        )
+        return _load_localization_entries_via_include(inapp_id)
+
+    return _normalize_localization_entries(response.get("data"))
+
+
+def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, str]]:
+    if not inapp_id:
+        return {}
+
     result: Dict[str, Dict[str, str]] = {}
-    for entry in response.get("data", []) or []:
+    for entry in _list_localization_entries(inapp_id):
         attributes = entry.get("attributes") or {}
         locale = attributes.get("locale")
         if not locale:
@@ -629,11 +689,11 @@ def _ensure_localizations(
     localizations: Iterable[Dict[str, Any]],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
     normalized = _normalize_localizations(localizations)
-    existing = _request(
-        "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
-    ).get("data", [])
+    existing_entries = _list_localization_entries(inapp_id)
     existing_by_locale = {
-        entry.get("attributes", {}).get("locale"): entry for entry in existing or []
+        entry.get("attributes", {}).get("locale"): entry
+        for entry in existing_entries
+        if isinstance(entry.get("attributes"), dict)
     }
 
     desired_locales = {
@@ -674,11 +734,9 @@ def _ensure_localizations(
         else:
             _request("POST", "/inAppPurchaseLocalizations", json=payload)
 
-    refreshed = _request(
-        "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
-    ).get("data", [])
+    refreshed = _list_localization_entries(inapp_id)
     locale_ids: Dict[str, str] = {}
-    for entry in refreshed or []:
+    for entry in refreshed:
         entry_id = entry.get("id")
         attributes = entry.get("attributes") or {}
         locale = attributes.get("locale")
@@ -833,7 +891,14 @@ def _get_price_point(price_tier: str, territory: str) -> Dict[str, Any]:
         "filter[territory]": territory,
         "page[limit]": 1,
     }
-    response = _request("GET", "/inAppPurchasePricePoints", params=params)
+    try:
+        response = _request("GET", "/inAppPurchasePricePoints", params=params)
+    except RuntimeError as exc:
+        if _is_forbidden_error(exc):
+            raise AppleStorePermissionError(
+                "Apple API 키에 가격 포인트를 조회할 권한이 없습니다."
+            ) from exc
+        raise
     data = response.get("data", [])
     if not data:
         raise RuntimeError(
@@ -1008,6 +1073,11 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
     tiers: Dict[str, Dict[str, Any]] = {}
     cursor: Optional[str] = None
 
+    permission_message = (
+        "Apple API 키에 인앱 가격 정보를 조회할 권한이 없습니다. "
+        "App Store Connect에서 API 키에 App Manager 또는 Finance 역할이 포함되어 있는지 확인해 주세요."
+    )
+
     try:
         while True:
             params = {
@@ -1024,12 +1094,16 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
             if not cursor:
                 break
     except RuntimeError as exc:
-        if not _is_forbidden_noop_error(exc):
+        if _is_forbidden_error(exc):
+            if _is_forbidden_noop_error(exc):
+                logger.warning(
+                    "Apple API rejected unrestricted price point listing; falling back to "
+                    "tier enumeration."
+                )
+            else:
+                raise AppleStorePermissionError(permission_message) from exc
+        else:
             raise
-        logger.warning(
-            "Apple API rejected unrestricted price point listing; falling back to "
-            "tier enumeration."
-        )
         tiers.clear()
         chunk_size = 25
         for index in range(0, len(_PRICE_TIER_GUESS_RANGE), chunk_size):
@@ -1050,6 +1124,8 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                         chunk,
                     )
                     continue
+                if _is_forbidden_error(inner_exc):
+                    raise AppleStorePermissionError(permission_message) from inner_exc
                 raise
             _collect_from_response(tiers, response)
 
