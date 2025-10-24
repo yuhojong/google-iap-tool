@@ -47,6 +47,9 @@ _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 
 
+_PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
+
+
 class AppleStoreConfigError(RuntimeError):
     """Raised when required Apple configuration is missing."""
 
@@ -326,6 +329,22 @@ def _is_parameter_error(exc: Exception) -> bool:
     return any(marker in message for marker in markers)
 
 
+def _is_path_error(exc: Exception) -> bool:
+    message = str(exc)
+    if not message:
+        return False
+    return "PATH_ERROR" in message or "The URL path is not valid" in message
+
+
+def _is_forbidden_noop_error(exc: Exception) -> bool:
+    message = str(exc)
+    if not message:
+        return False
+    if "FORBIDDEN_ERROR" not in message:
+        return False
+    return "no allowed operations" in message.lower()
+
+
 def list_inapp_purchases(
     cursor: Optional[str] = None, limit: int = 200
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -513,9 +532,22 @@ def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, s
     if not inapp_id:
         return {}
 
-    response = _request(
-        "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
-    )
+    try:
+        response = _request(
+            "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
+        )
+    except RuntimeError as exc:
+        if not _is_path_error(exc):
+            raise
+        logger.info(
+            "Apple API reported missing in-app localization relationship; "
+            "retrying with direct filter lookup.",
+        )
+        response = _request(
+            "GET",
+            "/inAppPurchaseLocalizations",
+            params={"filter[inAppPurchase]": inapp_id},
+        )
     result: Dict[str, Dict[str, str]] = {}
     for entry in response.get("data", []) or []:
         attributes = entry.get("attributes") or {}
@@ -954,18 +986,14 @@ def delete_inapp_purchase(inapp_id: str) -> None:
 
 
 def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
-    tiers: Dict[str, Dict[str, Any]] = {}
-    cursor: Optional[str] = None
+    def _tier_sort_key(value: str) -> tuple[int, str]:
+        digits = "".join(ch for ch in value if ch.isdigit())
+        return (int(digits) if digits else 0, value)
 
-    while True:
-        params = {
-            "filter[territory]": territory,
-            "page[limit]": 200,
-        }
-        if cursor:
-            params["page[cursor]"] = cursor
-        response = _request("GET", "/inAppPurchasePricePoints", params=params)
-        for entry in response.get("data", []):
+    def _collect_from_response(
+        tiers: Dict[str, Dict[str, Any]], response: Dict[str, Any]
+    ) -> None:
+        for entry in response.get("data", []) or []:
             attributes = entry.get("attributes") or {}
             tier_id = attributes.get("priceTier")
             if not tier_id or tier_id in tiers:
@@ -976,12 +1004,53 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                 "customerPrice": attributes.get("customerPrice"),
                 "proceeds": attributes.get("proceeds"),
             }
-        cursor = _extract_cursor(response.get("links", {}).get("next"))
-        if not cursor:
-            break
 
-    def _tier_sort_key(value: str) -> tuple[int, str]:
-        digits = "".join(ch for ch in value if ch.isdigit())
-        return (int(digits) if digits else 0, value)
+    tiers: Dict[str, Dict[str, Any]] = {}
+    cursor: Optional[str] = None
+
+    try:
+        while True:
+            params = {
+                "filter[territory]": territory,
+                "page[limit]": 200,
+            }
+            if cursor:
+                params["page[cursor]"] = cursor
+            response = _request(
+                "GET", "/inAppPurchasePricePoints", params=params
+            )
+            _collect_from_response(tiers, response)
+            cursor = _extract_cursor(response.get("links", {}).get("next"))
+            if not cursor:
+                break
+    except RuntimeError as exc:
+        if not _is_forbidden_noop_error(exc):
+            raise
+        logger.warning(
+            "Apple API rejected unrestricted price point listing; falling back to "
+            "tier enumeration."
+        )
+        tiers.clear()
+        chunk_size = 25
+        for index in range(0, len(_PRICE_TIER_GUESS_RANGE), chunk_size):
+            chunk = _PRICE_TIER_GUESS_RANGE[index : index + chunk_size]
+            params = {
+                "filter[territory]": territory,
+                "filter[priceTier]": ",".join(chunk),
+                "page[limit]": 200,
+            }
+            try:
+                response = _request(
+                    "GET", "/inAppPurchasePricePoints", params=params
+                )
+            except RuntimeError as inner_exc:
+                if _is_parameter_error(inner_exc):
+                    logger.debug(
+                        "Ignoring parameter error when probing price tiers chunk %s",
+                        chunk,
+                    )
+                    continue
+                raise
+            _collect_from_response(tiers, response)
 
     return [tiers[key] for key in sorted(tiers.keys(), key=_tier_sort_key)]
