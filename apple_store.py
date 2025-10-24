@@ -46,6 +46,7 @@ _TOKEN_CACHE: Optional[Tuple[str, int]] = None
 _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
+_LOCALIZATION_FILTER_SUPPORTED = True
 
 
 _PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
@@ -591,6 +592,11 @@ def _normalize_localization_entries(entries: object) -> List[Dict[str, Any]]:
 def _load_localization_entries_via_filter(
     inapp_id: str, resource_type: str
 ) -> List[Dict[str, Any]]:
+    global _LOCALIZATION_FILTER_SUPPORTED
+
+    if not _LOCALIZATION_FILTER_SUPPORTED:
+        return []
+
     filter_keys = ["inAppPurchase"]
     if resource_type == "inAppPurchasesV2":
         filter_keys = ["inAppPurchaseV2", "inAppPurchase"]
@@ -632,6 +638,7 @@ def _load_localization_entries_via_filter(
                         inapp_id,
                         filter_key,
                     )
+                    _LOCALIZATION_FILTER_SUPPORTED = False
                     return entries
                 raise
 
@@ -643,6 +650,7 @@ def _load_localization_entries_via_filter(
 
         # Try next filter key if the current one was rejected
 
+    _LOCALIZATION_FILTER_SUPPORTED = False
     return []
 
 
