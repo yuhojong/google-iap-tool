@@ -45,6 +45,7 @@ _TOKEN_CACHE: Optional[Tuple[str, int]] = None
 #
 _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
+_INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
 
 
 _PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
@@ -623,10 +624,31 @@ def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, s
 
 
 def _fetch_inapp_prices(inapp_id: Optional[str]) -> List[Dict[str, Any]]:
+    global _INAPP_PRICE_RELATIONSHIP_AVAILABLE
+
     if not inapp_id:
         return []
 
-    response = _request("GET", f"/inAppPurchases/{inapp_id}/prices")
+    if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
+        return []
+
+    try:
+        response = _request("GET", f"/inAppPurchases/{inapp_id}/prices")
+    except RuntimeError as exc:
+        if (
+            _is_path_error(exc)
+            or _is_forbidden_noop_error(exc)
+            or _is_forbidden_error(exc)
+        ):
+            if _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
+                logger.warning(
+                    "Apple API rejected in-app purchase price relationship lookup; "
+                    "price data will not be included in responses."
+                )
+            _INAPP_PRICE_RELATIONSHIP_AVAILABLE = False
+            return []
+        raise
+
     prices: List[Dict[str, Any]] = []
     for entry in response.get("data", []) or []:
         parsed = _parse_price_entry(entry)
@@ -949,9 +971,24 @@ def _get_price_point(price_tier: str, territory: str) -> Dict[str, Any]:
 def _replace_price_schedule(
     inapp_id: str, price_tier: Optional[str], territory: str
 ) -> None:
-    existing_prices = _request(
-        "GET", f"/inAppPurchases/{inapp_id}/prices"
-    ).get("data", [])
+    try:
+        existing_prices = _request(
+            "GET", f"/inAppPurchases/{inapp_id}/prices"
+        ).get("data", [])
+    except RuntimeError as exc:
+        if (
+            _is_path_error(exc)
+            or _is_forbidden_noop_error(exc)
+            or _is_forbidden_error(exc)
+        ):
+            logger.warning(
+                "Apple API denied price schedule lookup for %s; proceeding without "
+                "removing existing prices.",
+                inapp_id,
+            )
+            existing_prices = []
+        else:
+            raise
     for entry in existing_prices or []:
         entry_id = entry.get("id")
         if entry_id:
