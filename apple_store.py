@@ -547,43 +547,36 @@ def _normalize_localization_entries(entries: object) -> List[Dict[str, Any]]:
     return []
 
 
-def _load_localization_entries_via_include(inapp_id: str) -> List[Dict[str, Any]]:
-    response = _request(
-        "GET",
-        f"/inAppPurchases/{inapp_id}",
-        params={"include": "inAppPurchaseLocalizations"},
-    )
-    data = response.get("data") or {}
-    relationships = data.get("relationships") or {}
-    localization_rel = relationships.get("inAppPurchaseLocalizations") or {}
-    localization_ids = [
-        entry.get("id")
-        for entry in localization_rel.get("data", []) or []
-        if isinstance(entry, dict) and entry.get("id")
-    ]
-
-    included_map = _index_included(
-        response.get("included", []), "inAppPurchaseLocalizations"
-    )
-
+def _load_localization_entries_via_filter(inapp_id: str) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
-    for loc_id in localization_ids:
-        record: Optional[Dict[str, Any]] = included_map.get(loc_id)
-        if record is None:
-            try:
-                record_response = _request(
-                    "GET", f"/inAppPurchaseLocalizations/{loc_id}"
+    cursor: Optional[str] = None
+
+    while True:
+        params: Dict[str, Any] = {
+            "filter[inAppPurchase]": inapp_id,
+            "limit": "200",
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            response = _request(
+                "GET", "/inAppPurchaseLocalizations", params=params
+            )
+        except RuntimeError as exc:
+            if _is_parameter_error(exc) or _is_forbidden_noop_error(exc):
+                logger.warning(
+                    "Apple API denied localization filter lookup for %s", inapp_id
                 )
-            except RuntimeError as exc:
-                if _is_forbidden_error(exc):
-                    logger.warning(
-                        "Apple API denied direct localization lookup for %s", loc_id
-                    )
-                    continue
-                raise
-            record = record_response.get("data") if isinstance(record_response, dict) else None
-        if isinstance(record, dict):
-            entries.append(record)
+                return entries
+            raise
+
+        entries.extend(_normalize_localization_entries(response.get("data")))
+
+        cursor = _extract_cursor(response.get("links", {}).get("next"))
+        if not cursor:
+            break
+
     return entries
 
 
@@ -597,9 +590,9 @@ def _list_localization_entries(inapp_id: str) -> List[Dict[str, Any]]:
             raise
         logger.info(
             "Apple API reported missing in-app localization relationship; "
-            "retrying with included localization fetch.",
+            "retrying with filtered localization lookup.",
         )
-        return _load_localization_entries_via_include(inapp_id)
+        return _load_localization_entries_via_filter(inapp_id)
 
     return _normalize_localization_entries(response.get("data"))
 
@@ -632,6 +625,39 @@ def _fetch_inapp_prices(inapp_id: Optional[str]) -> List[Dict[str, Any]]:
         if parsed:
             prices.append(parsed)
     return prices
+
+
+def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
+    try:
+        response = _request(
+            "GET",
+            f"/inAppPurchases/{inapp_id}",
+            params={"include": "inAppPurchaseLocalizations,inAppPurchasePrices"},
+        )
+    except RuntimeError as exc:
+        if not _is_parameter_error(exc):
+            raise
+        logger.info(
+            "Apple API rejected include when fetching in-app purchase %s; "
+            "falling back to compatibility mode.",
+            inapp_id,
+        )
+    else:
+        data = response.get("data", {})
+        included = response.get("included", [])
+        localization_map = _index_included(
+            included, "inAppPurchaseLocalizations"
+        )
+        prices_map = _index_included(included, "inAppPurchasePrices")
+        result = _canonicalize_record(data, localization_map, prices_map)
+        if result:
+            return result
+
+    base = _request("GET", f"/inAppPurchases/{inapp_id}")
+    record = _canonicalize_record(base.get("data", {}), {}, {})
+    record["localizations"] = _fetch_inapp_localizations(inapp_id)
+    record["prices"] = _fetch_inapp_prices(inapp_id)
+    return record
 
 
 def _format_iso8601(date: Optional[str]) -> Optional[str]:
@@ -992,12 +1018,7 @@ def create_inapp_purchase(
     _sync_review_screenshots(locale_ids, normalized_localizations)
     _replace_price_schedule(inapp_id, price_tier, base_territory)
 
-    refreshed = _request("GET", f"/inAppPurchases/{inapp_id}", params={"include": "inAppPurchaseLocalizations,inAppPurchasePrices"})
-    localization_map = _index_included(
-        refreshed.get("included", []), "inAppPurchaseLocalizations"
-    )
-    prices_map = _index_included(refreshed.get("included", []), "inAppPurchasePrices")
-    return _canonicalize_record(refreshed.get("data", {}), localization_map, prices_map)
+    return _get_inapp_purchase_snapshot(inapp_id)
 
 
 def update_inapp_purchase(
@@ -1038,12 +1059,7 @@ def update_inapp_purchase(
     _sync_review_screenshots(locale_ids, normalized_localizations)
     _replace_price_schedule(inapp_id, price_tier, base_territory)
 
-    refreshed = _request("GET", f"/inAppPurchases/{inapp_id}", params={"include": "inAppPurchaseLocalizations,inAppPurchasePrices"})
-    localization_map = _index_included(
-        refreshed.get("included", []), "inAppPurchaseLocalizations"
-    )
-    prices_map = _index_included(refreshed.get("included", []), "inAppPurchasePrices")
-    return _canonicalize_record(refreshed.get("data", {}), localization_map, prices_map)
+    return _get_inapp_purchase_snapshot(inapp_id)
 
 
 def delete_inapp_purchase(inapp_id: str) -> None:
