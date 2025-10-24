@@ -564,7 +564,11 @@ def _load_localization_entries_via_filter(inapp_id: str) -> List[Dict[str, Any]]
                 "GET", "/inAppPurchaseLocalizations", params=params
             )
         except RuntimeError as exc:
-            if _is_parameter_error(exc) or _is_forbidden_noop_error(exc):
+            if (
+                _is_parameter_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+            ):
                 logger.warning(
                     "Apple API denied localization filter lookup for %s", inapp_id
                 )
@@ -586,7 +590,11 @@ def _list_localization_entries(inapp_id: str) -> List[Dict[str, Any]]:
             "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
         )
     except RuntimeError as exc:
-        if not (_is_path_error(exc) or _is_forbidden_noop_error(exc)):
+        if not (
+            _is_path_error(exc)
+            or _is_forbidden_noop_error(exc)
+            or _is_forbidden_error(exc)
+        ):
             raise
         logger.info(
             "Apple API reported missing in-app localization relationship; "
