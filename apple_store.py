@@ -246,7 +246,10 @@ def _request(
 ) -> Dict[str, Any]:
     if not path.startswith("/"):
         path = "/" + path
-    url = _APPLE_API_BASE.rstrip("/") + path
+    base_url = _APPLE_API_BASE.rstrip("/")
+    if path.startswith("/v2/") and base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")] or base_url
+    url = base_url + path
     logger.debug("Apple API Request %s %s", method, url)
     response = requests.request(
         method,
@@ -585,6 +588,45 @@ def _load_localization_entries_via_filter(inapp_id: str) -> List[Dict[str, Any]]
     return entries
 
 
+def _load_localization_entries_v2(
+    inapp_id: str,
+) -> Optional[List[Dict[str, Any]]]:
+    entries: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+
+    while True:
+        params: Dict[str, Any] = {"limit": "200"}
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            response = _request(
+                "GET",
+                f"/v2/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
+                params=params,
+            )
+        except RuntimeError as exc:
+            if (
+                _is_path_error(exc)
+                or _is_parameter_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+            ):
+                logger.info(
+                    "Apple API rejected v2 localization lookup for %s", inapp_id
+                )
+                return None
+            raise
+
+        entries.extend(_normalize_localization_entries(response.get("data")))
+
+        cursor = _extract_cursor(response.get("links", {}).get("next"))
+        if not cursor:
+            break
+
+    return entries
+
+
 def _list_localization_entries(inapp_id: str) -> List[Dict[str, Any]]:
     try:
         response = _request(
@@ -601,6 +643,9 @@ def _list_localization_entries(inapp_id: str) -> List[Dict[str, Any]]:
             "Apple API reported missing in-app localization relationship; "
             "retrying with filtered localization lookup.",
         )
+        v2_entries = _load_localization_entries_v2(inapp_id)
+        if v2_entries is not None:
+            return v2_entries
         return _load_localization_entries_via_filter(inapp_id)
 
     return _normalize_localization_entries(response.get("data"))
