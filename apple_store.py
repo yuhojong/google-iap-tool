@@ -344,6 +344,15 @@ def _is_path_error(exc: Exception) -> bool:
     return "PATH_ERROR" in message or "The URL path is not valid" in message
 
 
+def _is_not_found_error(exc: Exception) -> bool:
+    message = str(exc)
+    if not message:
+        return False
+    if "NOT_FOUND" in message:
+        return True
+    return "There is no resource of type" in message
+
+
 def _is_forbidden_noop_error(exc: Exception) -> bool:
     message = str(exc)
     if not message:
@@ -436,8 +445,11 @@ def list_inapp_purchases(
     for record in response.get("data", []):
         item = _canonicalize_record(record, {}, {})
         inapp_id = item.get("id")
-        item["localizations"] = _fetch_inapp_localizations(inapp_id)
-        item["prices"] = _fetch_inapp_prices(inapp_id)
+        resource_type = item.get("resourceType", "inAppPurchases")
+        item["localizations"] = _fetch_inapp_localizations(
+            inapp_id, resource_type
+        )
+        item["prices"] = _fetch_inapp_prices(inapp_id, resource_type)
         items.append(item)
 
     next_cursor = _extract_cursor(response.get("links", {}).get("next"))
@@ -531,6 +543,7 @@ def _canonicalize_record(
     product_id = attributes.get("productId", "")
     return {
         "id": record.get("id", ""),
+        "resourceType": record.get("type", "inAppPurchases"),
         "sku": product_id,
         "productId": product_id,
         "referenceName": attributes.get("referenceName", ""),
@@ -551,112 +564,160 @@ def _normalize_localization_entries(entries: object) -> List[Dict[str, Any]]:
     return []
 
 
-def _load_localization_entries_via_filter(inapp_id: str) -> List[Dict[str, Any]]:
-    entries: List[Dict[str, Any]] = []
-    cursor: Optional[str] = None
+def _load_localization_entries_via_filter(
+    inapp_id: str, resource_type: str
+) -> List[Dict[str, Any]]:
+    filter_keys = ["inAppPurchase"]
+    if resource_type == "inAppPurchasesV2":
+        filter_keys = ["inAppPurchaseV2", "inAppPurchase"]
 
-    while True:
-        params: Dict[str, Any] = {
-            "filter[inAppPurchase]": inapp_id,
-            "limit": "200",
-        }
-        if cursor:
-            params["cursor"] = cursor
+    for index, filter_key in enumerate(filter_keys):
+        entries: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
 
-        try:
-            response = _request(
-                "GET", "/inAppPurchaseLocalizations", params=params
-            )
-        except RuntimeError as exc:
-            if (
-                _is_parameter_error(exc)
-                or _is_forbidden_noop_error(exc)
-                or _is_forbidden_error(exc)
-            ):
-                logger.warning(
-                    "Apple API denied localization filter lookup for %s", inapp_id
+        while True:
+            params: Dict[str, Any] = {
+                f"filter[{filter_key}]": inapp_id,
+                "limit": "200",
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                response = _request(
+                    "GET", "/inAppPurchaseLocalizations", params=params
                 )
+            except RuntimeError as exc:
+                has_alternate_filter = index + 1 < len(filter_keys)
+                if _is_parameter_error(exc) and has_alternate_filter:
+                    logger.info(
+                        "Apple API rejected localization filter '%s' for %s; "
+                        "retrying with alternate filter.",
+                        filter_key,
+                        inapp_id,
+                    )
+                    break
+                if (
+                    _is_parameter_error(exc)
+                    or _is_forbidden_noop_error(exc)
+                    or _is_forbidden_error(exc)
+                    or _is_not_found_error(exc)
+                ):
+                    logger.warning(
+                        "Apple API denied localization filter lookup for %s (filter=%s)",
+                        inapp_id,
+                        filter_key,
+                    )
+                    return entries
+                raise
+
+            entries.extend(_normalize_localization_entries(response.get("data")))
+
+            cursor = _extract_cursor(response.get("links", {}).get("next"))
+            if not cursor:
                 return entries
-            raise
 
-        entries.extend(_normalize_localization_entries(response.get("data")))
+        # Try next filter key if the current one was rejected
 
-        cursor = _extract_cursor(response.get("links", {}).get("next"))
-        if not cursor:
-            break
-
-    return entries
+    return []
 
 
 def _load_localization_entries_v2(
-    inapp_id: str,
+    inapp_id: str, resource_type: str
 ) -> Optional[List[Dict[str, Any]]]:
     entries: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
 
-    while True:
-        params: Dict[str, Any] = {"limit": "200"}
-        if cursor:
-            params["cursor"] = cursor
+    candidates = [
+        f"/v2/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
+    ]
+    if resource_type == "inAppPurchasesV2":
+        candidates.insert(
+            0, f"/v2/inAppPurchasesV2/{inapp_id}/inAppPurchaseLocalizations"
+        )
 
-        try:
-            response = _request(
-                "GET",
-                f"/v2/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
-                params=params,
+    for path in candidates:
+        entries.clear()
+        cursor = None
+
+        while True:
+            params: Dict[str, Any] = {"limit": "200"}
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                response = _request("GET", path, params=params)
+            except RuntimeError as exc:
+                if (
+                    _is_path_error(exc)
+                    or _is_parameter_error(exc)
+                    or _is_forbidden_noop_error(exc)
+                    or _is_forbidden_error(exc)
+                    or _is_not_found_error(exc)
+                ):
+                    logger.info(
+                        "Apple API rejected v2 localization lookup for %s via %s",
+                        inapp_id,
+                        path,
+                    )
+                    break
+                raise
+
+            entries.extend(
+                _normalize_localization_entries(response.get("data"))
             )
+
+            cursor = _extract_cursor(response.get("links", {}).get("next"))
+            if not cursor:
+                return entries
+
+    return None
+
+
+def _list_localization_entries(
+    inapp_id: str, resource_type: str
+) -> List[Dict[str, Any]]:
+    candidates = [
+        f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
+    ]
+    if resource_type == "inAppPurchasesV2":
+        candidates.insert(
+            0, f"/inAppPurchasesV2/{inapp_id}/inAppPurchaseLocalizations"
+        )
+
+    for path in candidates:
+        try:
+            response = _request("GET", path)
         except RuntimeError as exc:
-            if (
+            if not (
                 _is_path_error(exc)
-                or _is_parameter_error(exc)
                 or _is_forbidden_noop_error(exc)
                 or _is_forbidden_error(exc)
+                or _is_not_found_error(exc)
             ):
-                logger.info(
-                    "Apple API rejected v2 localization lookup for %s", inapp_id
-                )
-                return None
-            raise
+                raise
+            logger.info(
+                "Apple API reported missing in-app localization relationship via %s; "
+                "retrying with alternate lookup methods.",
+                path,
+            )
+        else:
+            return _normalize_localization_entries(response.get("data"))
 
-        entries.extend(_normalize_localization_entries(response.get("data")))
-
-        cursor = _extract_cursor(response.get("links", {}).get("next"))
-        if not cursor:
-            break
-
-    return entries
-
-
-def _list_localization_entries(inapp_id: str) -> List[Dict[str, Any]]:
-    try:
-        response = _request(
-            "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
-        )
-    except RuntimeError as exc:
-        if not (
-            _is_path_error(exc)
-            or _is_forbidden_noop_error(exc)
-            or _is_forbidden_error(exc)
-        ):
-            raise
-        logger.info(
-            "Apple API reported missing in-app localization relationship; "
-            "retrying with filtered localization lookup.",
-        )
-        v2_entries = _load_localization_entries_v2(inapp_id)
-        if v2_entries is not None:
-            return v2_entries
-        return _load_localization_entries_via_filter(inapp_id)
-
-    return _normalize_localization_entries(response.get("data"))
+    v2_entries = _load_localization_entries_v2(inapp_id, resource_type)
+    if v2_entries is not None:
+        return v2_entries
+    return _load_localization_entries_via_filter(inapp_id, resource_type)
 
 
-def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, str]]:
+def _fetch_inapp_localizations(
+    inapp_id: Optional[str], resource_type: str = "inAppPurchases"
+) -> Dict[str, Dict[str, str]]:
     if not inapp_id:
         return {}
 
     result: Dict[str, Dict[str, str]] = {}
-    for entry in _list_localization_entries(inapp_id):
+    for entry in _list_localization_entries(inapp_id, resource_type):
         attributes = entry.get("attributes") or {}
         locale = attributes.get("locale")
         if not locale:
@@ -668,7 +729,9 @@ def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, s
     return result
 
 
-def _fetch_inapp_prices(inapp_id: Optional[str]) -> List[Dict[str, Any]]:
+def _fetch_inapp_prices(
+    inapp_id: Optional[str], resource_type: str = "inAppPurchases"
+) -> List[Dict[str, Any]]:
     global _INAPP_PRICE_RELATIONSHIP_AVAILABLE
 
     if not inapp_id:
@@ -677,29 +740,37 @@ def _fetch_inapp_prices(inapp_id: Optional[str]) -> List[Dict[str, Any]]:
     if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
         return []
 
-    try:
-        response = _request("GET", f"/inAppPurchases/{inapp_id}/prices")
-    except RuntimeError as exc:
-        if (
-            _is_path_error(exc)
-            or _is_forbidden_noop_error(exc)
-            or _is_forbidden_error(exc)
-        ):
-            if _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
-                logger.warning(
-                    "Apple API rejected in-app purchase price relationship lookup; "
-                    "price data will not be included in responses."
-                )
-            _INAPP_PRICE_RELATIONSHIP_AVAILABLE = False
-            return []
-        raise
+    paths = [f"/inAppPurchases/{inapp_id}/prices"]
+    if resource_type == "inAppPurchasesV2":
+        paths.insert(0, f"/inAppPurchasesV2/{inapp_id}/inAppPurchasePrices")
 
-    prices: List[Dict[str, Any]] = []
-    for entry in response.get("data", []) or []:
-        parsed = _parse_price_entry(entry)
-        if parsed:
-            prices.append(parsed)
-    return prices
+    for path in paths:
+        try:
+            response = _request("GET", path)
+        except RuntimeError as exc:
+            if (
+                _is_path_error(exc)
+                or _is_forbidden_noop_error(exc)
+                or _is_forbidden_error(exc)
+                or _is_not_found_error(exc)
+            ):
+                continue
+            raise
+        else:
+            prices: List[Dict[str, Any]] = []
+            for entry in response.get("data", []) or []:
+                parsed = _parse_price_entry(entry)
+                if parsed:
+                    prices.append(parsed)
+            return prices
+
+    if _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
+        logger.warning(
+            "Apple API rejected in-app purchase price relationship lookup; "
+            "price data will not be included in responses."
+        )
+    _INAPP_PRICE_RELATIONSHIP_AVAILABLE = False
+    return []
 
 
 def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
@@ -730,8 +801,9 @@ def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
 
     base = _request("GET", f"/inAppPurchases/{inapp_id}")
     record = _canonicalize_record(base.get("data", {}), {}, {})
-    record["localizations"] = _fetch_inapp_localizations(inapp_id)
-    record["prices"] = _fetch_inapp_prices(inapp_id)
+    resource_type = record.get("resourceType", "inAppPurchases")
+    record["localizations"] = _fetch_inapp_localizations(inapp_id, resource_type)
+    record["prices"] = _fetch_inapp_prices(inapp_id, resource_type)
     return record
 
 
