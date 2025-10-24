@@ -1,16 +1,26 @@
+import asyncio
 import base64
 import binascii
 import csv
+import hashlib
+import hmac
 import io
+import json
 import logging
 import mimetypes
 import os
 import posixpath
+import shlex
+import subprocess
 import zipfile
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from contextlib import asynccontextmanager
+from functools import wraps
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -72,6 +82,163 @@ app.add_middleware(
 static_files = StaticFiles(directory="static", html=True)
 
 app.mount("/static", static_files, name="static")
+
+
+CSV_PROCESSING_LOCK = asyncio.Lock()
+CSV_IDLE_EVENT = asyncio.Event()
+CSV_IDLE_EVENT.set()
+_csv_processing_counter = 0
+
+DEPLOYMENT_LOCK = asyncio.Lock()
+
+DEFAULT_REPO_PATH = Path(__file__).resolve().parent
+TARGET_BRANCH = os.getenv("DEPLOY_TARGET_BRANCH", "main")
+REPO_PATH = Path(os.getenv("DEPLOY_REPO_PATH", DEFAULT_REPO_PATH)).resolve()
+RESTART_COMMAND = os.getenv("DEPLOY_RESTART_COMMAND")
+POST_UPDATE_COMMANDS = os.getenv("DEPLOY_POST_UPDATE_COMMANDS")
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET")
+
+
+def _parse_additional_commands(value: str | None) -> List[List[str]]:
+    commands: List[List[str]] = []
+    if not value:
+        return commands
+    for line in value.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        commands.append(shlex.split(candidate))
+    return commands
+
+
+@asynccontextmanager
+async def _csv_processing_guard():
+    global _csv_processing_counter
+    async with CSV_PROCESSING_LOCK:
+        _csv_processing_counter += 1
+        CSV_IDLE_EVENT.clear()
+    try:
+        yield
+    finally:
+        async with CSV_PROCESSING_LOCK:
+            _csv_processing_counter = max(0, _csv_processing_counter - 1)
+            if _csv_processing_counter == 0:
+                CSV_IDLE_EVENT.set()
+
+
+def csv_processing_endpoint(endpoint):
+    @wraps(endpoint)
+    async def wrapper(*args, **kwargs):
+        async with _csv_processing_guard():
+            return await endpoint(*args, **kwargs)
+
+    return wrapper
+
+
+async def _run_command(command: List[str], *, cwd: Path) -> None:
+    command_display = " ".join(command)
+
+    def _execute():
+        result = subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.stdout:
+            logger.info("%s stdout: %s", command_display, result.stdout.strip())
+        if result.stderr:
+            logger.warning("%s stderr: %s", command_display, result.stderr.strip())
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Command '{command_display}' failed with exit code {result.returncode}"
+            )
+
+    logger.info("Running command: %s", command_display)
+    await asyncio.to_thread(_execute)
+
+
+async def _perform_deployment(trigger_id: str | None) -> None:
+    async with DEPLOYMENT_LOCK:
+        if trigger_id:
+            logger.info("Deployment triggered by %s", trigger_id)
+        else:
+            logger.info("Deployment triggered")
+
+        await CSV_IDLE_EVENT.wait()
+        logger.info("CSV processing complete. Proceeding with deployment.")
+
+        if not REPO_PATH.exists():
+            raise RuntimeError(f"Repository path does not exist: {REPO_PATH}")
+
+        commands: List[List[str]] = [
+            ["git", "fetch", "origin", TARGET_BRANCH],
+            ["git", "reset", "--hard", f"origin/{TARGET_BRANCH}"],
+        ]
+        commands.extend(_parse_additional_commands(POST_UPDATE_COMMANDS))
+
+        if RESTART_COMMAND:
+            commands.append(shlex.split(RESTART_COMMAND))
+        else:
+            logger.warning(
+                "DEPLOY_RESTART_COMMAND is not set. Deployment will not restart the service."
+            )
+
+        for command in commands:
+            await _run_command(command, cwd=REPO_PATH)
+
+        logger.info("Deployment finished successfully.")
+
+
+def _verify_github_signature(secret: str, payload: bytes, signature_header: str | None) -> bool:
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    signature = signature_header.split("=", 1)[1]
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(digest, signature)
+
+
+def _schedule_deployment(trigger_id: str | None) -> None:
+    asyncio.create_task(_perform_deployment(trigger_id))
+
+
+@app.post("/webhook/github")
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    if not GITHUB_WEBHOOK_SECRET:
+        logger.error("GITHUB_WEBHOOK_SECRET is not configured.")
+        raise HTTPException(status_code=500, detail="Webhook secret is not configured.")
+
+    body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not _verify_github_signature(GITHUB_WEBHOOK_SECRET, body, signature):
+        logger.warning("Received GitHub webhook with invalid signature.")
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+
+    event = request.headers.get("X-GitHub-Event", "")
+    if event != "push":
+        logger.info("Ignoring GitHub event: %s", event)
+        return {"status": "ignored", "reason": "unsupported_event"}
+
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to decode webhook payload: %s", exc)
+        raise HTTPException(status_code=400, detail="Invalid JSON payload.") from exc
+
+    expected_ref = f"refs/heads/{TARGET_BRANCH}"
+    ref = payload.get("ref")
+    if ref != expected_ref:
+        logger.info("Ignoring push to %s. Watching %s.", ref, expected_ref)
+        return {"status": "ignored", "reason": "branch_mismatch"}
+
+    delivery = request.headers.get("X-GitHub-Delivery")
+    head_commit = payload.get("after") or (payload.get("head_commit") or {}).get("id")
+    trigger_id = head_commit or delivery
+
+    background_tasks.add_task(_schedule_deployment, trigger_id)
+
+    return {"status": "queued"}
 
 
 @app.get("/")
@@ -1013,6 +1180,7 @@ async def api_list_inapp(
 
 
 @app.get("/api/google/inapp/export")
+@csv_processing_endpoint
 async def api_export_inapp() -> StreamingResponse:
     try:
         products = refresh_products_from_remote(GOOGLE_STORE, _fetch_google_products)
@@ -1055,6 +1223,7 @@ async def api_export_inapp() -> StreamingResponse:
 
 
 @app.get("/api/google/inapp/new/template")
+@csv_processing_endpoint
 async def api_bulk_create_template(
     row_count: int = Query(default=20, ge=1, le=500, description="템플릿에 포함할 행 수"),
 ) -> StreamingResponse:
@@ -1096,6 +1265,7 @@ async def api_list_price_templates():
 
 
 @app.post("/api/google/inapp/new/import/preview")
+@csv_processing_endpoint
 async def api_bulk_create_preview(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
@@ -1157,6 +1327,7 @@ async def api_create_inapp(payload: CreateInAppRequest):
 
 
 @app.post("/api/google/inapp/new/import/apply")
+@csv_processing_endpoint
 async def api_bulk_create_apply(request: BulkCreateApplyRequest):
     results = {"create": 0}
 
@@ -1238,6 +1409,7 @@ async def api_delete_inapp(sku: str):
 
 
 @app.post("/api/google/inapp/import/preview")
+@csv_processing_endpoint
 async def api_import_preview(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
@@ -1276,6 +1448,7 @@ async def api_import_preview(file: UploadFile = File(...)):
 
 
 @app.post("/api/google/inapp/import/apply")
+@csv_processing_endpoint
 async def api_import_apply(request: ImportApplyRequest):
     results = {"create": 0, "update": 0, "delete": 0}
 
@@ -1358,6 +1531,7 @@ async def api_apple_list_inapp(
 
 
 @app.get("/api/apple/inapp/export")
+@csv_processing_endpoint
 async def api_apple_export_inapp() -> StreamingResponse:
     try:
         products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
@@ -1528,6 +1702,7 @@ async def api_apple_delete_inapp(product_id: str):
 
 
 @app.post("/api/apple/inapp/import/preview")
+@csv_processing_endpoint
 async def api_apple_import_preview(file: UploadFile = File(...)):
     content = await file.read()
     if not content:
@@ -1562,6 +1737,7 @@ async def api_apple_import_preview(file: UploadFile = File(...)):
 
 
 @app.post("/api/apple/inapp/import/apply")
+@csv_processing_endpoint
 async def api_apple_import_apply(request: AppleImportApplyRequest):
     summary = {"create": 0, "update": 0, "delete": 0}
 
