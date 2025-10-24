@@ -14,6 +14,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -33,6 +34,17 @@ _PRICE_POINTS_CACHE_TTL = int(os.getenv("APP_STORE_PRICE_POINT_CACHE_TTL", "1800
 
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: Optional[Tuple[str, int]] = None
+
+#
+# Some older versions of the App Store Connect API supported JSON:API style
+# query parameters such as ``include`` and ``page[limit]`` when listing in-app
+# purchases. The latest version rejects these parameters with ``PARAMETER_ERROR``
+# responses. We optimistically attempt to use the richer query first and fall
+# back to a compatibility mode when the server indicates that the parameters
+# are no longer accepted.
+#
+_INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
+_INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 
 
 class AppleStoreConfigError(RuntimeError):
@@ -280,47 +292,119 @@ def _format_authorization_error(body_text: str) -> str:
 def _extract_cursor(next_link: Optional[str]) -> Optional[str]:
     if not next_link:
         return None
-    # The next link may include many query params; we only need the cursor value.
-    if "page[cursor]=" not in next_link:
-        return None
-    return next_link.split("page[cursor]=", 1)[1].split("&", 1)[0]
+
+    parsed = urlparse(next_link)
+    query = parse_qs(parsed.query or "")
+    for key in ("page[cursor]", "cursor"):
+        values = query.get(key)
+        if values:
+            return values[0]
+    # Some responses may include an already URL-encoded ``page[cursor]`` value
+    # in the path portion (e.g. ``...page%5Bcursor%5D=...``). Fallback to the
+    # original string search so we do not miss such cases.
+    if "page[cursor]=" in next_link:
+        return next_link.split("page[cursor]=", 1)[1].split("&", 1)[0]
+    if "page%5Bcursor%5D=" in next_link:
+        return next_link.split("page%5Bcursor%5D=", 1)[1].split("&", 1)[0]
+    return None
 
 
 def _get_app_id() -> str:
     return _require_env("APP_STORE_APP_ID")
 
 
+def _is_parameter_error(exc: Exception) -> bool:
+    message = str(exc)
+    if not message:
+        return False
+    markers = (
+        "PARAMETER_ERROR",
+        "not a valid relationship name",
+        "not a valid field name",
+        "not be used with this request",
+    )
+    return any(marker in message for marker in markers)
+
+
 def list_inapp_purchases(
     cursor: Optional[str] = None, limit: int = 200
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    params: Dict[str, Any] = {
-        "include": "inAppPurchaseLocalizations,inAppPurchasePrices",
-        "fields[inAppPurchases]": ",".join(
-            [
-                "productId",
-                "referenceName",
-                "inAppPurchaseType",
-                "state",
-                "clearedForSale",
-                "familySharable",
-            ]
-        ),
-        "page[limit]": limit,
-    }
-    if cursor:
-        params["page[cursor]"] = cursor
-    response = _request(
-        "GET", f"/apps/{_get_app_id()}/inAppPurchases", params=params
-    )
-    included = response.get("included", [])
-    localization_map = _index_included(included, "inAppPurchaseLocalizations")
-    prices_map = _index_included(included, "inAppPurchasePrices")
+    global _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS, _INAPP_LIST_SUPPORTS_LIMIT_PARAM
 
-    items: List[Dict[str, Any]] = []
+    endpoint = f"/apps/{_get_app_id()}/inAppPurchases"
+
+    if _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS:
+        params: Dict[str, Any] = {
+            "include": "inAppPurchaseLocalizations,inAppPurchasePrices",
+            "fields[inAppPurchases]": ",".join(
+                [
+                    "productId",
+                    "referenceName",
+                    "inAppPurchaseType",
+                    "state",
+                    "clearedForSale",
+                    "familySharable",
+                ]
+            ),
+        }
+        if limit:
+            params["page[limit]"] = limit
+        if cursor:
+            params["page[cursor]"] = cursor
+        try:
+            response = _request("GET", endpoint, params=params)
+        except RuntimeError as exc:
+            if _is_parameter_error(exc):
+                logger.warning(
+                    "Apple API rejected extended in-app purchase parameters; "
+                    "retrying in compatibility mode."
+                )
+                _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = False
+            else:
+                raise
+        else:
+            included = response.get("included", [])
+            localization_map = _index_included(
+                included, "inAppPurchaseLocalizations"
+            )
+            prices_map = _index_included(included, "inAppPurchasePrices")
+
+            items: List[Dict[str, Any]] = []
+            for record in response.get("data", []):
+                items.append(
+                    _canonicalize_record(record, localization_map, prices_map)
+                )
+
+            next_cursor = _extract_cursor(response.get("links", {}).get("next"))
+            return items, next_cursor
+
+    params = {}
+    if cursor:
+        params["cursor"] = cursor
+    if limit and _INAPP_LIST_SUPPORTS_LIMIT_PARAM:
+        params["limit"] = limit
+
+    try:
+        response = _request("GET", endpoint, params=params)
+    except RuntimeError as exc:
+        if "limit" in params and _is_parameter_error(exc):
+            logger.info(
+                "Apple API rejected limit parameter when listing in-app purchases; "
+                "retrying without limit."
+            )
+            _INAPP_LIST_SUPPORTS_LIMIT_PARAM = False
+            params.pop("limit", None)
+            response = _request("GET", endpoint, params=params)
+        else:
+            raise
+
+    items = []
     for record in response.get("data", []):
-        items.append(
-            _canonicalize_record(record, localization_map, prices_map)
-        )
+        item = _canonicalize_record(record, {}, {})
+        inapp_id = item.get("id")
+        item["localizations"] = _fetch_inapp_localizations(inapp_id)
+        item["prices"] = _fetch_inapp_prices(inapp_id)
+        items.append(item)
 
     next_cursor = _extract_cursor(response.get("links", {}).get("next"))
     return items, next_cursor
@@ -354,6 +438,28 @@ def _index_included(included: Iterable[Dict[str, Any]], resource_type: str) -> D
     return mapping
 
 
+def _parse_price_entry(entry: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return None
+
+    attributes = entry.get("attributes") or {}
+    relationships = entry.get("relationships") or {}
+    territory = (
+        (relationships.get("territory") or {})
+        .get("data", {})
+        .get("id")
+    )
+
+    return {
+        "id": entry.get("id"),
+        "currency": attributes.get("currency"),
+        "price": attributes.get("price"),
+        "startDate": attributes.get("startDate"),
+        "territory": territory,
+        "priceTier": attributes.get("priceTier"),
+    }
+
+
 def _canonicalize_record(
     record: Dict[str, Any],
     localization_map: Dict[str, Dict[str, Any]],
@@ -383,23 +489,10 @@ def _canonicalize_record(
         price_id = price_ref.get("id")
         if not price_id:
             continue
-        price_entry = prices_map.get(price_id) or {}
-        price_attr = price_entry.get("attributes") or {}
-        territory_attr = (
-            (price_entry.get("relationships") or {})
-            .get("territory", {})
-            .get("data", {})
-        )
-        prices.append(
-            {
-                "id": price_id,
-                "currency": price_attr.get("currency"),
-                "price": price_attr.get("price"),
-                "startDate": price_attr.get("startDate"),
-                "territory": territory_attr.get("id"),
-                "priceTier": price_attr.get("priceTier"),
-            }
-        )
+        price_entry = prices_map.get(price_id) or price_ref
+        parsed_price = _parse_price_entry(price_entry)
+        if parsed_price:
+            prices.append(parsed_price)
 
     product_id = attributes.get("productId", "")
     return {
@@ -414,6 +507,39 @@ def _canonicalize_record(
         "localizations": localizations,
         "prices": prices,
     }
+
+
+def _fetch_inapp_localizations(inapp_id: Optional[str]) -> Dict[str, Dict[str, str]]:
+    if not inapp_id:
+        return {}
+
+    response = _request(
+        "GET", f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"
+    )
+    result: Dict[str, Dict[str, str]] = {}
+    for entry in response.get("data", []) or []:
+        attributes = entry.get("attributes") or {}
+        locale = attributes.get("locale")
+        if not locale:
+            continue
+        result[locale] = {
+            "name": attributes.get("name", ""),
+            "description": attributes.get("description", ""),
+        }
+    return result
+
+
+def _fetch_inapp_prices(inapp_id: Optional[str]) -> List[Dict[str, Any]]:
+    if not inapp_id:
+        return []
+
+    response = _request("GET", f"/inAppPurchases/{inapp_id}/prices")
+    prices: List[Dict[str, Any]] = []
+    for entry in response.get("data", []) or []:
+        parsed = _parse_price_entry(entry)
+        if parsed:
+            prices.append(parsed)
+    return prices
 
 
 def _format_iso8601(date: Optional[str]) -> Optional[str]:
