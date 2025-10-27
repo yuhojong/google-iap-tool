@@ -80,12 +80,90 @@ def get_fixed_price_territories() -> Tuple[str, ...]:
     return _FIXED_PRICE_TERRITORIES
 
 
+def _normalize_error_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key in ("id", "status", "code", "title", "detail"):
+        value = entry.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (str, int)):
+            normalized[key] = str(value)
+        else:
+            normalized[key] = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return normalized
+
+
+def _summarize_api_errors(errors: Iterable[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for entry in errors:
+        if not isinstance(entry, dict):
+            continue
+        normalized = _normalize_error_entry(entry)
+        code = normalized.get("code") or normalized.get("status")
+        detail = normalized.get("detail") or normalized.get("title")
+        if code or detail:
+            snippet = " ".join(
+                filter(None, [f"[{code}]" if code else "", detail])
+            )
+            parts.append(snippet)
+        else:
+            remaining = {
+                key: value
+                for key, value in normalized.items()
+                if key not in {"code", "status", "detail", "title"}
+            }
+            if remaining:
+                parts.append(json.dumps(remaining, ensure_ascii=False, sort_keys=True))
+    return "; ".join(parts)
+
+
+def _compose_permission_error_message(
+    exc: Optional[Exception], default_message: str
+) -> str:
+    if isinstance(exc, AppleStoreApiError):
+        detail = _summarize_api_errors(exc.errors)
+        if detail:
+            return f"{default_message} 원본 오류: {detail}"
+        if exc.body_text:
+            return f"{default_message} 원본 오류: {exc.body_text}"
+    if exc:
+        message = str(exc).strip()
+        if message and message != default_message:
+            return f"{default_message} 원본 오류: {message}"
+    return default_message
+
+
 class AppleStoreConfigError(RuntimeError):
     """Raised when required Apple configuration is missing."""
 
 
 class AppleStorePermissionError(AppleStoreConfigError):
     """Raised when the App Store Connect API denies an operation."""
+
+
+class AppleStoreApiError(RuntimeError):
+    """Represents an error response returned by the Apple API."""
+
+    def __init__(
+        self,
+        status_code: int,
+        body_text: str,
+        errors: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self.status_code = status_code
+        self.body_text = body_text
+        self.errors = errors or []
+        message = self._build_message()
+        super().__init__(message)
+
+    def _build_message(self) -> str:
+        if self.errors:
+            summary = _summarize_api_errors(self.errors)
+            if summary:
+                return f"Apple API 오류 {self.status_code}: {summary}"
+        if self.body_text:
+            return f"Apple API 오류 {self.status_code}: {self.body_text}"
+        return f"Apple API 오류 {self.status_code}"
 
 
 def _encode_jwt(payload: Dict[str, Any], private_key: str, headers: Dict[str, str]) -> str:
@@ -290,17 +368,37 @@ def _request(
     )
     if response.status_code >= 400:
         body_text = response.text.strip()
+        errors: List[Dict[str, Any]] = []
+        if body_text:
+            try:
+                payload = response.json()
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                raw_errors = payload.get("errors")
+                if isinstance(raw_errors, list):
+                    errors = [
+                        entry
+                        for entry in raw_errors
+                        if isinstance(entry, dict)
+                    ]
+        summary = _summarize_api_errors(errors) if errors else body_text or ""
         logger.error(
-            "Apple API error", extra={"status": response.status_code, "body": body_text}
+            "Apple API error %s: %s",
+            response.status_code,
+            summary or "No response body",
+            extra={
+                "status": response.status_code,
+                "body": body_text,
+                "errors": errors,
+            },
         )
         if response.status_code == 401:
             _invalidate_token_cache()
             raise AppleStoreConfigError(
                 _format_authorization_error(body_text)
             )
-        raise RuntimeError(
-            f"Apple API 오류 {response.status_code}: {body_text}"
-        )
+        raise AppleStoreApiError(response.status_code, body_text, errors)
     if response.status_code == 204 or not response.content:
         return {}
     return response.json()
@@ -354,6 +452,23 @@ def _get_app_id() -> str:
 
 
 def _is_parameter_error(exc: Exception) -> bool:
+    if isinstance(exc, AppleStoreApiError):
+        if exc.status_code == 400:
+            return True
+        for entry in exc.errors:
+            code = (entry.get("code") or entry.get("status") or "").upper()
+            if "PARAMETER" in code:
+                return True
+            detail = (entry.get("detail") or entry.get("title") or "").lower()
+            if any(
+                marker in detail
+                for marker in (
+                    "not a valid relationship name",
+                    "not a valid field name",
+                    "not be used with this request",
+                )
+            ):
+                return True
     message = str(exc)
     if not message:
         return False
@@ -383,6 +498,13 @@ def _is_not_found_error(exc: Exception) -> bool:
 
 
 def _is_forbidden_noop_error(exc: Exception) -> bool:
+    if isinstance(exc, AppleStoreApiError):
+        if exc.status_code == 403:
+            for entry in exc.errors:
+                detail = (entry.get("detail") or entry.get("title") or "").lower()
+                if "no allowed operations" in detail:
+                    return True
+        return False
     message = str(exc)
     if not message:
         return False
@@ -392,6 +514,14 @@ def _is_forbidden_noop_error(exc: Exception) -> bool:
 
 
 def _is_forbidden_error(exc: Exception) -> bool:
+    if isinstance(exc, AppleStoreApiError):
+        if exc.status_code == 403:
+            return True
+        for entry in exc.errors:
+            code = (entry.get("code") or entry.get("status") or "").upper()
+            if "FORBIDDEN" in code:
+                return True
+        return False
     message = str(exc)
     if not message:
         return False
@@ -1358,11 +1488,12 @@ def _get_price_point(price_tier: str, territory: str) -> Dict[str, Any]:
     }
     try:
         response = _request("GET", "/inAppPurchasePricePoints", params=params)
-    except RuntimeError as exc:
+    except AppleStoreApiError as exc:
         if _is_forbidden_error(exc):
-            raise AppleStorePermissionError(
-                "Apple API 키에 가격 포인트를 조회할 권한이 없습니다."
-            ) from exc
+            message = _compose_permission_error_message(
+                exc, "Apple API 키에 가격 포인트를 조회할 권한이 없습니다."
+            )
+            raise AppleStorePermissionError(message) from exc
         raise
     data = response.get("data", [])
     if not data:
@@ -1581,17 +1712,18 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
             cursor = _extract_cursor(response.get("links", {}).get("next"))
             if not cursor:
                 break
-    except RuntimeError as exc:
-        if _is_forbidden_error(exc):
-            if _is_forbidden_noop_error(exc):
-                logger.warning(
-                    "Apple API rejected unrestricted price point listing; falling back to "
-                    "tier enumeration."
-                )
-            else:
-                raise AppleStorePermissionError(permission_message) from exc
-        else:
+    except AppleStoreApiError as exc:
+        if not _is_forbidden_error(exc):
             raise
+        if _is_forbidden_noop_error(exc):
+            logger.warning(
+                "Apple API rejected unrestricted price point listing; falling back to "
+                "tier enumeration."
+            )
+        else:
+            message = _compose_permission_error_message(exc, permission_message)
+            raise AppleStorePermissionError(message) from exc
+
         tiers.clear()
         chunk_size = 25
         for index in range(0, len(_PRICE_TIER_GUESS_RANGE), chunk_size):
@@ -1605,7 +1737,7 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                 response = _request(
                     "GET", "/inAppPurchasePricePoints", params=params
                 )
-            except RuntimeError as inner_exc:
+            except AppleStoreApiError as inner_exc:
                 if _is_parameter_error(inner_exc):
                     logger.debug(
                         "Ignoring parameter error when probing price tiers chunk %s",
@@ -1613,7 +1745,42 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                     )
                     continue
                 if _is_forbidden_error(inner_exc):
-                    raise AppleStorePermissionError(permission_message) from inner_exc
+                    logger.debug(
+                        "Apple API forbade chunked price tier request; retrying tier-by-tier",
+                        extra={"chunk": chunk},
+                    )
+                    successful = False
+                    for tier in chunk:
+                        tier_params = {
+                            "filter[territory]": territory,
+                            "filter[priceTier]": tier,
+                            "page[limit]": 1,
+                        }
+                        try:
+                            tier_response = _request(
+                                "GET", "/inAppPurchasePricePoints", params=tier_params
+                            )
+                        except AppleStoreApiError as single_exc:
+                            if _is_parameter_error(single_exc):
+                                logger.debug(
+                                    "Ignoring parameter error when probing price tier %s",
+                                    tier,
+                                )
+                                continue
+                            if _is_forbidden_error(single_exc):
+                                message = _compose_permission_error_message(
+                                    single_exc, permission_message
+                                )
+                                raise AppleStorePermissionError(message) from single_exc
+                            raise
+                        _collect_from_response(tiers, tier_response)
+                        successful = True
+                    if successful:
+                        continue
+                    message = _compose_permission_error_message(
+                        inner_exc, permission_message
+                    )
+                    raise AppleStorePermissionError(message) from inner_exc
                 raise
             _collect_from_response(tiers, response)
 
