@@ -46,6 +46,7 @@ _TOKEN_CACHE: Optional[Tuple[str, int]] = None
 _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
+_PRICE_POINTS_SUPPORTS_PAGE_PARAMS = True
 
 _INAPP_V2_ID_CACHE: Dict[str, Optional[str]] = {}
 _INAPP_V2_ID_BY_PRODUCT_ID: Dict[str, Optional[str]] = {}
@@ -1474,6 +1475,41 @@ class _PricePointCacheEntry:
 _PRICE_POINT_CACHE: Dict[str, _PricePointCacheEntry] = {}
 
 
+def _build_price_point_params(
+    filters: Dict[str, Any], *, limit: int, cursor: Optional[str] = None
+) -> Dict[str, Any]:
+    params = dict(filters)
+    if _PRICE_POINTS_SUPPORTS_PAGE_PARAMS:
+        params["page[limit]"] = limit
+        if cursor:
+            params["page[cursor]"] = cursor
+    else:
+        params["limit"] = limit
+        if cursor:
+            params["cursor"] = cursor
+    return params
+
+
+def _request_price_points(
+    filters: Dict[str, Any], *, limit: int, cursor: Optional[str] = None
+) -> Dict[str, Any]:
+    global _PRICE_POINTS_SUPPORTS_PAGE_PARAMS
+
+    while True:
+        params = _build_price_point_params(filters, limit=limit, cursor=cursor)
+        try:
+            return _request("GET", "/inAppPurchasePricePoints", params=params)
+        except AppleStoreApiError as exc:
+            if _is_parameter_error(exc) and _PRICE_POINTS_SUPPORTS_PAGE_PARAMS:
+                logger.info(
+                    "Apple API rejected page[] pagination for price points; "
+                    "retrying with compatibility parameters.",
+                )
+                _PRICE_POINTS_SUPPORTS_PAGE_PARAMS = False
+                continue
+            raise
+
+
 def _get_price_point(price_tier: str, territory: str) -> Dict[str, Any]:
     key = _build_price_point_cache_key(price_tier, territory)
     cached = _PRICE_POINT_CACHE.get(key)
@@ -1484,10 +1520,9 @@ def _get_price_point(price_tier: str, territory: str) -> Dict[str, Any]:
     params = {
         "filter[priceTier]": price_tier,
         "filter[territory]": territory,
-        "page[limit]": 1,
     }
     try:
-        response = _request("GET", "/inAppPurchasePricePoints", params=params)
+        response = _request_price_points(params, limit=1)
     except AppleStoreApiError as exc:
         if _is_forbidden_error(exc):
             message = _compose_permission_error_message(
@@ -1699,15 +1734,8 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
 
     try:
         while True:
-            params = {
-                "filter[territory]": territory,
-                "page[limit]": 200,
-            }
-            if cursor:
-                params["page[cursor]"] = cursor
-            response = _request(
-                "GET", "/inAppPurchasePricePoints", params=params
-            )
+            filters = {"filter[territory]": territory}
+            response = _request_price_points(filters, limit=200, cursor=cursor)
             _collect_from_response(tiers, response)
             cursor = _extract_cursor(response.get("links", {}).get("next"))
             if not cursor:
@@ -1728,15 +1756,12 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
         chunk_size = 25
         for index in range(0, len(_PRICE_TIER_GUESS_RANGE), chunk_size):
             chunk = _PRICE_TIER_GUESS_RANGE[index : index + chunk_size]
-            params = {
-                "filter[territory]": territory,
-                "filter[priceTier]": ",".join(chunk),
-                "page[limit]": 200,
-            }
             try:
-                response = _request(
-                    "GET", "/inAppPurchasePricePoints", params=params
-                )
+                filters = {
+                    "filter[territory]": territory,
+                    "filter[priceTier]": ",".join(chunk),
+                }
+                response = _request_price_points(filters, limit=200)
             except AppleStoreApiError as inner_exc:
                 if _is_parameter_error(inner_exc):
                     logger.debug(
@@ -1751,14 +1776,13 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                     )
                     successful = False
                     for tier in chunk:
-                        tier_params = {
-                            "filter[territory]": territory,
-                            "filter[priceTier]": tier,
-                            "page[limit]": 1,
-                        }
                         try:
-                            tier_response = _request(
-                                "GET", "/inAppPurchasePricePoints", params=tier_params
+                            tier_filters = {
+                                "filter[territory]": territory,
+                                "filter[priceTier]": tier,
+                            }
+                            tier_response = _request_price_points(
+                                tier_filters, limit=1
                             )
                         except AppleStoreApiError as single_exc:
                             if _is_parameter_error(single_exc):
