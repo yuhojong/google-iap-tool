@@ -45,6 +45,7 @@ _TOKEN_CACHE: Optional[Tuple[str, int]] = None
 #
 _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
+_INAPP_LIST_SUPPORTS_V2_ENDPOINT = True
 _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
 _PRICE_POINTS_SUPPORTS_PAGE_PARAMS = True
 
@@ -331,6 +332,22 @@ def _generate_token() -> str:
         return token
 
 
+def generate_jwt(*, force_refresh: bool = False) -> str:
+    """Return a JWT for the App Store Connect API.
+
+    Parameters
+    ----------
+    force_refresh:
+        When ``True`` the cached token (if any) is discarded so that a new token
+        is generated. This can be useful for scripts that always want a fresh
+        token.
+    """
+
+    if force_refresh:
+        _invalidate_token_cache()
+    return _generate_token()
+
+
 def _auth_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {_generate_token()}",
@@ -448,6 +465,38 @@ def _extract_cursor(next_link: Optional[str]) -> Optional[str]:
     return None
 
 
+def _list_inapp_purchase_identifiers_v2(
+    *,
+    cursor: Optional[str] = None,
+    limit: int = 200,
+) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    endpoint = f"/apps/{_get_app_id()}/inAppPurchasesV2"
+
+    params: Dict[str, Any] = {}
+    if cursor:
+        params["cursor"] = cursor
+
+    if limit:
+        if limit < 0:
+            limit = 0
+        if limit:
+            params["limit"] = min(limit, 200)
+
+    response = _request("GET", endpoint, params=params or None)
+
+    identifiers: List[Tuple[str, str]] = []
+    for entry in response.get("data", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        inapp_id = entry.get("id")
+        resource_type = entry.get("type") or "inAppPurchases"
+        if isinstance(inapp_id, str):
+            identifiers.append((inapp_id, resource_type))
+
+    next_cursor = _extract_cursor(response.get("links", {}).get("next"))
+    return identifiers, next_cursor
+
+
 def _get_app_id() -> str:
     return _require_env("APP_STORE_APP_ID")
 
@@ -536,6 +585,44 @@ def list_inapp_purchases(
     include_relationships: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     global _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS, _INAPP_LIST_SUPPORTS_LIMIT_PARAM
+    global _INAPP_LIST_SUPPORTS_V2_ENDPOINT
+
+    if _INAPP_LIST_SUPPORTS_V2_ENDPOINT:
+        try:
+            identifiers, next_cursor = _list_inapp_purchase_identifiers_v2(
+                cursor=cursor, limit=limit
+            )
+        except RuntimeError as exc:
+            if _is_parameter_error(exc) or _is_path_error(exc):
+                logger.info(
+                    "Apple API rejected inAppPurchasesV2 listing; falling back to legacy mode."
+                )
+                _INAPP_LIST_SUPPORTS_V2_ENDPOINT = False
+            else:
+                raise
+        else:
+            items: List[Dict[str, Any]] = []
+            for inapp_id, resource_type in identifiers:
+                try:
+                    record = _get_inapp_purchase_snapshot(
+                        inapp_id, include_relationships=include_relationships
+                    )
+                except Exception as exc:  # pragma: no cover - network dependent
+                    if _is_not_found_error(exc) or _is_forbidden_error(exc):
+                        logger.warning(
+                            "Skipping in-app purchase %s due to API error: %s",
+                            inapp_id,
+                            exc,
+                        )
+                        continue
+                    raise
+
+                record.setdefault("resourceType", resource_type)
+                if not include_relationships:
+                    record.pop("localizations", None)
+                    record.pop("prices", None)
+                items.append(record)
+            return items, next_cursor
 
     endpoint = f"/apps/{_get_app_id()}/inAppPurchases"
 
@@ -1139,7 +1226,9 @@ def _fetch_inapp_prices(
     return []
 
 
-def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
+def _get_inapp_purchase_snapshot(
+    inapp_id: str, *, include_relationships: bool = True
+) -> Dict[str, Any]:
     resolved_id, resolved_type = _resolve_inapp_v2_identifier(
         inapp_id, "inAppPurchases"
     )
@@ -1161,15 +1250,16 @@ def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
     for prefix in path_prefixes:
         path = f"/{prefix}/{lookup_id}"
         try:
-            response = _request(
-                "GET",
-                path,
-                params={
+            params = (
+                {
                     "include": "inAppPurchaseLocalizations,inAppPurchasePrices"
-                },
+                }
+                if include_relationships
+                else None
             )
+            response = _request("GET", path, params=params)
         except RuntimeError as exc:
-            if _is_parameter_error(exc):
+            if include_relationships and _is_parameter_error(exc):
                 logger.info(
                     "Apple API rejected include when fetching in-app purchase %s via %s; "
                     "falling back to compatibility mode.",
@@ -1188,13 +1278,24 @@ def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
                 raise
         else:
             data = response.get("data", {})
-            included = response.get("included", [])
-            localization_map = _index_included(
-                included, "inAppPurchaseLocalizations"
+            included = (
+                response.get("included", []) if include_relationships else []
             )
-            prices_map = _index_included(included, "inAppPurchasePrices")
+            localization_map = (
+                _index_included(included, "inAppPurchaseLocalizations")
+                if include_relationships
+                else {}
+            )
+            prices_map = (
+                _index_included(included, "inAppPurchasePrices")
+                if include_relationships
+                else {}
+            )
             result = _canonicalize_record(data, localization_map, prices_map)
             if result:
+                if not include_relationships:
+                    result.pop("localizations", None)
+                    result.pop("prices", None)
                 return result
 
         try:
@@ -1213,10 +1314,14 @@ def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
 
         record = _canonicalize_record(base.get("data", {}), {}, {})
         resource_type = record.get("resourceType", "inAppPurchases")
-        record["localizations"] = _fetch_inapp_localizations(
-            lookup_id, resource_type
-        )
-        record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+        if include_relationships:
+            record["localizations"] = _fetch_inapp_localizations(
+                lookup_id, resource_type
+            )
+            record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+        else:
+            record.pop("localizations", None)
+            record.pop("prices", None)
         return record
 
     if last_error:
