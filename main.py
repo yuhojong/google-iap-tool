@@ -115,6 +115,10 @@ _csv_processing_counter = 0
 
 DEPLOYMENT_LOCK = asyncio.Lock()
 
+
+async def _run_in_thread(func, /, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
 DEFAULT_REPO_PATH = Path(__file__).resolve().parent
 TARGET_BRANCH = os.getenv("DEPLOY_TARGET_BRANCH", "main")
 REPO_PATH = Path(os.getenv("DEPLOY_REPO_PATH", DEFAULT_REPO_PATH)).resolve()
@@ -1625,9 +1629,15 @@ async def api_apple_list_inapp(
 ):
     try:
         if refresh:
-            refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
-        items, next_token = get_paginated_products(
-            APPLE_STORE, _fetch_apple_products, token, page_size=page_size
+            await _run_in_thread(
+                refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
+            )
+        items, next_token = await _run_in_thread(
+            get_paginated_products,
+            APPLE_STORE,
+            _fetch_apple_products,
+            token,
+            page_size=page_size,
         )
         return {"items": items, "nextPageToken": next_token}
     except HTTPException:
@@ -1643,7 +1653,7 @@ async def api_apple_list_inapp(
 @app.get("/api/apple/pricing/tiers")
 async def api_apple_price_tiers(territory: str = Query(default="KOR", min_length=2)):
     try:
-        tiers = list_apple_price_tiers(territory)
+        tiers = await _run_in_thread(list_apple_price_tiers, territory)
         return {"tiers": tiers}
     except AppleStoreConfigError as exc:
         logger.error("Apple Store configuration error: %s", exc)
@@ -1656,18 +1666,22 @@ async def api_apple_price_tiers(territory: str = Query(default="KOR", min_length
 @app.post("/api/apple/inapp/create")
 async def api_apple_create_inapp(payload: AppleCreateInAppRequest):
     try:
-        result = create_apple_inapp_purchase(
-            product_id=payload.product_id,
-            reference_name=payload.reference_name,
-            purchase_type=payload.purchase_type,
-            cleared_for_sale=payload.cleared_for_sale,
-            family_sharable=payload.family_sharable,
-            review_note=payload.review_note,
-            price_tier=payload.price_tier,
-            base_territory=payload.base_territory,
-            localizations=[loc.model_dump() for loc in payload.localizations],
-        )
-        upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
+        def _create_and_cache() -> Dict[str, Any]:
+            result = create_apple_inapp_purchase(
+                product_id=payload.product_id,
+                reference_name=payload.reference_name,
+                purchase_type=payload.purchase_type,
+                cleared_for_sale=payload.cleared_for_sale,
+                family_sharable=payload.family_sharable,
+                review_note=payload.review_note,
+                price_tier=payload.price_tier,
+                base_territory=payload.base_territory,
+                localizations=[loc.model_dump() for loc in payload.localizations],
+            )
+            upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
+            return result
+
+        result = await _run_in_thread(_create_and_cache)
         return {"status": "ok", "item": result}
     except HTTPException:
         raise
@@ -1718,34 +1732,38 @@ def _find_apple_inapp(product_id: str) -> Dict[str, Any]:
 
 @app.get("/api/apple/inapp/{product_id}/detail")
 async def api_apple_get_inapp_detail(product_id: str):
-    item = _find_apple_inapp(product_id)
+    item = await _run_in_thread(_find_apple_inapp, product_id)
     return {"item": item}
 
 
 @app.put("/api/apple/inapp/{product_id}")
 async def api_apple_update_inapp(product_id: str, payload: AppleUpdateInAppRequest):
     try:
-        target = _find_apple_inapp(product_id)
-        inapp_id = target.get("id")
-        if not inapp_id:
-            raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
+        def _update_and_cache() -> Dict[str, Any]:
+            target = _find_apple_inapp(product_id)
+            inapp_id = target.get("id")
+            if not inapp_id:
+                raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
 
-        localizations = payload.localizations or [
-            AppleLocalization(locale=locale, name=data.get("name", ""), description=data.get("description", ""))
-            for locale, data in (target.get("localizations") or {}).items()
-        ]
+            localizations = payload.localizations or [
+                AppleLocalization(locale=locale, name=data.get("name", ""), description=data.get("description", ""))
+                for locale, data in (target.get("localizations") or {}).items()
+            ]
 
-        result = update_apple_inapp_purchase(
-            inapp_id=inapp_id,
-            reference_name=payload.reference_name,
-            cleared_for_sale=payload.cleared_for_sale,
-            family_sharable=payload.family_sharable,
-            review_note=payload.review_note,
-            price_tier=payload.price_tier,
-            base_territory=payload.base_territory,
-            localizations=[loc.model_dump() for loc in localizations],
-        )
-        upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
+            result = update_apple_inapp_purchase(
+                inapp_id=inapp_id,
+                reference_name=payload.reference_name,
+                cleared_for_sale=payload.cleared_for_sale,
+                family_sharable=payload.family_sharable,
+                review_note=payload.review_note,
+                price_tier=payload.price_tier,
+                base_territory=payload.base_territory,
+                localizations=[loc.model_dump() for loc in localizations],
+            )
+            upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
+            return result
+
+        result = await _run_in_thread(_update_and_cache)
         return {"status": "ok", "item": result}
     except HTTPException:
         raise
@@ -1762,12 +1780,15 @@ async def api_apple_update_inapp(product_id: str, payload: AppleUpdateInAppReque
 @app.delete("/api/apple/inapp/{product_id}")
 async def api_apple_delete_inapp(product_id: str):
     try:
-        target = _find_apple_inapp(product_id)
-        inapp_id = target.get("id")
-        if not inapp_id:
-            raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
-        delete_apple_inapp_purchase(inapp_id)
-        delete_cached_product(APPLE_STORE, product_id)
+        def _delete_and_purge() -> None:
+            target = _find_apple_inapp(product_id)
+            inapp_id = target.get("id")
+            if not inapp_id:
+                raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
+            delete_apple_inapp_purchase(inapp_id)
+            delete_cached_product(APPLE_STORE, product_id)
+
+        await _run_in_thread(_delete_and_purge)
         return {"status": "ok"}
     except HTTPException:
         raise
@@ -1784,7 +1805,9 @@ async def api_apple_delete_inapp(product_id: str):
 @app.post("/api/apple/inapp/bulk-delete/preview")
 async def api_apple_bulk_delete_preview(request: AppleBulkDeletePreviewRequest):
     try:
-        products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+        products = await _run_in_thread(
+            refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
+        )
     except AppleStoreConfigError as exc:
         logger.error("Apple Store configuration error: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -1827,32 +1850,38 @@ async def api_apple_bulk_delete_preview(request: AppleBulkDeletePreviewRequest):
 
 @app.post("/api/apple/inapp/bulk-delete/apply")
 async def api_apple_bulk_delete_apply(request: AppleBulkDeleteApplyRequest):
-    summary = {"deleted": 0, "failed": []}
+    try:
+        def _apply_bulk_delete() -> Dict[str, Any]:
+            summary = {"deleted": 0, "failed": []}
 
-    for entry in request.items:
-        try:
-            delete_apple_inapp_purchase(entry.inapp_id)
-        except AppleStoreConfigError as exc:
-            logger.error("Apple Store configuration error: %s", exc)
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            logger.exception(
-                "Failed to delete Apple in-app purchase %s", entry.inapp_id
-            )
-            summary["failed"].append(
-                {
-                    "inapp_id": entry.inapp_id,
-                    "product_id": entry.product_id,
-                    "reason": str(exc),
-                }
-            )
-            continue
+            for entry in request.items:
+                try:
+                    delete_apple_inapp_purchase(entry.inapp_id)
+                except AppleStoreConfigError as exc:
+                    logger.error("Apple Store configuration error: %s", exc)
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to delete Apple in-app purchase %s", entry.inapp_id
+                    )
+                    summary["failed"].append(
+                        {
+                            "inapp_id": entry.inapp_id,
+                            "product_id": entry.product_id,
+                            "reason": str(exc),
+                        }
+                    )
+                    continue
 
-        delete_cached_product(APPLE_STORE, entry.product_id)
-        summary["deleted"] += 1
+                delete_cached_product(APPLE_STORE, entry.product_id)
+                summary["deleted"] += 1
 
-    status = "ok" if not summary["failed"] else "partial"
-    return {"status": status, "summary": summary}
+            status = "ok" if not summary["failed"] else "partial"
+            return {"status": status, "summary": summary}
+
+        return await _run_in_thread(_apply_bulk_delete)
+    except HTTPException:
+        raise
 
 
 @app.get("/health")
