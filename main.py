@@ -32,6 +32,7 @@ from apple_store import (
     create_inapp_purchase as create_apple_inapp_purchase,
     delete_inapp_purchase as delete_apple_inapp_purchase,
     get_all_inapp_purchases,
+    get_inapp_purchase_detail as get_apple_inapp_purchase_detail,
     get_fixed_price_territories,
     list_price_tiers as list_apple_price_tiers,
     update_inapp_purchase as update_apple_inapp_purchase,
@@ -422,6 +423,52 @@ class AppleUpdateInAppRequest(BaseModel):
     localizations: List[AppleLocalization] = Field(default_factory=list)
 
 
+class AppleBulkDeletePreviewRequest(BaseModel):
+    identifier_type: Literal["reference_name", "product_id", "sku", "iap_id"]
+    values: List[str] = Field(..., min_length=1)
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def _coerce_values(cls, value):
+        if isinstance(value, str):
+            tokens = [token.strip() for token in value.replace(",", "\n").splitlines()]
+            return [token for token in tokens if token]
+        if isinstance(value, list):
+            result = []
+            for item in value:
+                if isinstance(item, str):
+                    token = item.strip()
+                    if token:
+                        result.append(token)
+            return result
+        raise TypeError("values must be a string or list of strings")
+
+    @model_validator(mode="after")
+    def _ensure_values(self):  # type: ignore[override]
+        unique = list(dict.fromkeys(self.values))
+        if not unique:
+            raise ValueError("삭제할 항목을 하나 이상 입력해주세요.")
+        object.__setattr__(self, "values", unique)
+        return self
+
+
+class AppleBulkDeleteItem(BaseModel):
+    inapp_id: str = Field(..., min_length=1)
+    product_id: str = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def _normalize(self):  # type: ignore[override]
+        object.__setattr__(self, "inapp_id", self.inapp_id.strip())
+        object.__setattr__(self, "product_id", self.product_id.strip())
+        if not self.inapp_id or not self.product_id:
+            raise ValueError("유효한 상품 정보를 입력해주세요.")
+        return self
+
+
+class AppleBulkDeleteApplyRequest(BaseModel):
+    items: List[AppleBulkDeleteItem] = Field(..., min_length=1)
+
+
 class AppleImportPayload(BaseModel):
     product_id: str = Field(..., min_length=1)
     reference_name: str = Field(..., min_length=1)
@@ -509,7 +556,11 @@ def _fetch_google_products() -> List[Dict[str, Any]]:
 
 
 def _fetch_apple_products() -> List[Dict[str, Any]]:
-    return get_all_inapp_purchases()
+    products = get_all_inapp_purchases(include_relationships=False)
+    for item in products:
+        if isinstance(item, dict):
+            item.pop("localizations", None)
+    return products
 
 
 def _collect_locales_from_apple_products(products: Iterable[Dict[str, Any]]) -> List[str]:
@@ -520,6 +571,29 @@ def _collect_locales_from_apple_products(products: Iterable[Dict[str, Any]]) -> 
             if isinstance(locale, str) and locale:
                 locales.add(locale)
     return sorted(locales)
+
+
+def _to_apple_summary(product: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(product, dict):
+        return {}
+    summary = {
+        "id": product.get("id"),
+        "resourceType": product.get("resourceType"),
+        "sku": product.get("productId") or product.get("sku"),
+        "productId": product.get("productId") or product.get("sku"),
+        "referenceName": product.get("referenceName"),
+        "type": product.get("type"),
+        "state": product.get("state"),
+        "clearedForSale": product.get("clearedForSale"),
+        "familySharable": product.get("familySharable"),
+    }
+    prices = product.get("prices")
+    if isinstance(prices, list):
+        summary["prices"] = prices
+    price_tier = product.get("priceTier")
+    if price_tier and "prices" not in summary:
+        summary["prices"] = [{"priceTier": price_tier}]
+    return summary
 
 
 def _normalize_zip_path(name: str) -> str:
@@ -1566,65 +1640,6 @@ async def api_apple_list_inapp(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/apple/inapp/export")
-@csv_processing_endpoint
-async def api_apple_export_inapp() -> StreamingResponse:
-    try:
-        products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
-        locales = _collect_locales_from_apple_products(products)
-
-        fieldnames = [
-            "product_id",
-            "reference_name",
-            "type",
-            "state",
-            "cleared_for_sale",
-            "family_sharable",
-            "price_tier",
-            "base_territory",
-            "review_note",
-        ]
-        for locale in locales:
-            fieldnames.append(f"name_{locale}")
-            fieldnames.append(f"description_{locale}")
-            fieldnames.append(f"screenshot_{locale}")
-
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
-        writer.writeheader()
-        for item in products:
-            localizations = item.get("localizations") or {}
-            row = {
-                "product_id": item.get("productId") or item.get("sku") or "",
-                "reference_name": item.get("referenceName", ""),
-                "type": item.get("type", ""),
-                "state": item.get("state", ""),
-                "cleared_for_sale": "yes" if item.get("clearedForSale") else "no",
-                "family_sharable": "yes" if item.get("familySharable") else "no",
-                "price_tier": (item.get("prices") or [{}])[0].get("priceTier") if item.get("prices") else "",
-                "base_territory": (item.get("prices") or [{}])[0].get("territory", "KOR"),
-                "review_note": "",
-            }
-            for locale in locales:
-                loc = localizations.get(locale) or {}
-                row[f"name_{locale}"] = loc.get("name", "")
-                row[f"description_{locale}"] = loc.get("description", "")
-                row[f"screenshot_{locale}"] = ""
-            writer.writerow(row)
-
-        csv_bytes = output.getvalue().encode("utf-8-sig")
-        headers = {"Content-Disposition": 'attachment; filename="apple-iap-products.csv"'}
-        return StreamingResponse(iter([csv_bytes]), media_type="text/csv", headers=headers)
-    except HTTPException:
-        raise
-    except AppleStoreConfigError as exc:
-        logger.error("Apple Store configuration error: %s", exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Failed to export Apple in-app purchases")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
 @app.get("/api/apple/pricing/tiers")
 async def api_apple_price_tiers(territory: str = Query(default="KOR", min_length=2)):
     try:
@@ -1652,7 +1667,7 @@ async def api_apple_create_inapp(payload: AppleCreateInAppRequest):
             base_territory=payload.base_territory,
             localizations=[loc.model_dump() for loc in payload.localizations],
         )
-        upsert_cached_product(APPLE_STORE, result)
+        upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
         return {"status": "ok", "item": result}
     except HTTPException:
         raise
@@ -1667,17 +1682,44 @@ async def api_apple_create_inapp(payload: AppleCreateInAppRequest):
 
 
 def _find_apple_inapp(product_id: str) -> Dict[str, Any]:
+    normalized = (product_id or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=404, detail="Apple 인앱 상품을 찾을 수 없습니다.")
+
+    def _lookup(products: Iterable[Dict[str, Any]]) -> Optional[str]:
+        for item in products:
+            if not isinstance(item, dict):
+                continue
+            candidate = item.get("productId") or item.get("sku")
+            if candidate == normalized:
+                inapp_id = item.get("id")
+                if isinstance(inapp_id, str) and inapp_id:
+                    return inapp_id
+        return None
+
     products = get_cached_products(APPLE_STORE, _fetch_apple_products)
-    for item in products:
-        candidate = item.get("productId") or item.get("sku")
-        if candidate == product_id:
-            return item
-    products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
-    for item in products:
-        candidate = item.get("productId") or item.get("sku")
-        if candidate == product_id:
-            return item
-    raise HTTPException(status_code=404, detail="해당 Apple 인앱 상품을 찾을 수 없습니다.")
+    inapp_id = _lookup(products)
+    if not inapp_id:
+        products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+        inapp_id = _lookup(products)
+
+    if not inapp_id:
+        raise HTTPException(status_code=404, detail="해당 Apple 인앱 상품을 찾을 수 없습니다.")
+
+    try:
+        return get_apple_inapp_purchase_detail(inapp_id)
+    except AppleStoreConfigError as exc:
+        logger.error("Apple Store configuration error: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to fetch Apple in-app purchase detail")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/apple/inapp/{product_id}/detail")
+async def api_apple_get_inapp_detail(product_id: str):
+    item = _find_apple_inapp(product_id)
+    return {"item": item}
 
 
 @app.put("/api/apple/inapp/{product_id}")
@@ -1703,7 +1745,7 @@ async def api_apple_update_inapp(product_id: str, payload: AppleUpdateInAppReque
             base_territory=payload.base_territory,
             localizations=[loc.model_dump() for loc in localizations],
         )
-        upsert_cached_product(APPLE_STORE, result)
+        upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
         return {"status": "ok", "item": result}
     except HTTPException:
         raise
@@ -1737,119 +1779,80 @@ async def api_apple_delete_inapp(product_id: str):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/apple/inapp/import/preview")
-@csv_processing_endpoint
-async def api_apple_import_preview(file: UploadFile = File(...)):
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
 
-    csv_bytes, attachments = _extract_csv_bundle(content, file.filename)
-    rows, locales = _parse_apple_import_csv(csv_bytes, attachments)
 
+@app.post("/api/apple/inapp/bulk-delete/preview")
+async def api_apple_bulk_delete_preview(request: AppleBulkDeletePreviewRequest):
     try:
-        existing_products_raw = refresh_products_from_remote(
-            APPLE_STORE, _fetch_apple_products
-        )
-        existing_products = {
-            (item.get("productId") or item.get("sku")): item
-            for item in existing_products_raw
-            if item.get("productId") or item.get("sku")
-        }
+        products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
     except AppleStoreConfigError as exc:
         logger.error("Apple Store configuration error: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Failed to load Apple in-app purchases for preview")
+        logger.exception("Failed to load Apple in-app purchases for bulk delete preview")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    operations_payload = _build_apple_import_operations(rows, existing_products, locales)
+    lookup_field = {
+        "reference_name": "referenceName",
+        "product_id": "productId",
+        "sku": "productId",
+        "iap_id": "id",
+    }[request.identifier_type]
 
-    return {
-        "locales": locales,
-        "operations": operations_payload["operations"],
-        "summary": operations_payload["summary"],
-    }
+    index: Dict[str, List[Dict[str, Any]]] = {}
+    for item in products:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(lookup_field)
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if not normalized:
+            continue
+        index.setdefault(normalized, []).append(item)
+
+    matches: List[Dict[str, Any]] = []
+    for raw in request.values:
+        normalized = raw.strip()
+        for item in index.get(normalized, []):
+            summary = _to_apple_summary(item)
+            if not summary:
+                continue
+            summary["matchedValue"] = normalized
+            summary.setdefault("identifierType", request.identifier_type)
+            matches.append(summary)
+
+    return {"matches": matches}
 
 
-@app.post("/api/apple/inapp/import/apply")
-@csv_processing_endpoint
-async def api_apple_import_apply(request: AppleImportApplyRequest):
-    summary = {"create": 0, "update": 0, "delete": 0}
+@app.post("/api/apple/inapp/bulk-delete/apply")
+async def api_apple_bulk_delete_apply(request: AppleBulkDeleteApplyRequest):
+    summary = {"deleted": 0, "failed": []}
 
-    try:
-        existing_list = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
-        existing_map: Dict[str, Dict[str, Any]] = {
-            (item.get("productId") or item.get("sku")): item for item in existing_list if item.get("productId") or item.get("sku")
-        }
+    for entry in request.items:
+        try:
+            delete_apple_inapp_purchase(entry.inapp_id)
+        except AppleStoreConfigError as exc:
+            logger.error("Apple Store configuration error: %s", exc)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception(
+                "Failed to delete Apple in-app purchase %s", entry.inapp_id
+            )
+            summary["failed"].append(
+                {
+                    "inapp_id": entry.inapp_id,
+                    "product_id": entry.product_id,
+                    "reason": str(exc),
+                }
+            )
+            continue
 
-        for op in request.operations:
-            product_id = op.product_id
-            if op.action == "create":
-                if not op.data or not op.data.purchase_type:
-                    raise HTTPException(status_code=400, detail="create 작업에는 data와 purchase_type이 필요합니다.")
-                created = create_apple_inapp_purchase(
-                    product_id=op.data.product_id,
-                    reference_name=op.data.reference_name,
-                    purchase_type=op.data.purchase_type,
-                    cleared_for_sale=op.data.cleared_for_sale,
-                    family_sharable=op.data.family_sharable,
-                    review_note=op.data.review_note,
-                    price_tier=op.data.price_tier,
-                    base_territory=op.data.base_territory,
-                    localizations=[loc.model_dump() for loc in op.data.localizations],
-                )
-                summary["create"] += 1
-                existing_map[product_id] = created
-                upsert_cached_product(APPLE_STORE, created)
-            elif op.action == "update":
-                if not op.data:
-                    raise HTTPException(status_code=400, detail="update 작업에는 data가 필요합니다.")
-                current = existing_map.get(product_id)
-                if not current:
-                    current = _find_apple_inapp(product_id)
-                    existing_map[product_id] = current
-                inapp_id = current.get("id")
-                if not inapp_id:
-                    raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
-                updated = update_apple_inapp_purchase(
-                    inapp_id=inapp_id,
-                    reference_name=op.data.reference_name,
-                    cleared_for_sale=op.data.cleared_for_sale,
-                    family_sharable=op.data.family_sharable,
-                    review_note=op.data.review_note,
-                    price_tier=op.data.price_tier,
-                    base_territory=op.data.base_territory,
-                    localizations=[loc.model_dump() for loc in op.data.localizations],
-                )
-                summary["update"] += 1
-                existing_map[product_id] = updated
-                upsert_cached_product(APPLE_STORE, updated)
-            elif op.action == "delete":
-                current = existing_map.get(product_id)
-                if not current:
-                    current = _find_apple_inapp(product_id)
-                inapp_id = current.get("id")
-                if not inapp_id:
-                    raise HTTPException(status_code=404, detail="Apple 인앱 상품 ID를 확인할 수 없습니다.")
-                delete_apple_inapp_purchase(inapp_id)
-                summary["delete"] += 1
-                existing_map.pop(product_id, None)
-                delete_cached_product(APPLE_STORE, product_id)
-            else:
-                raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
-    except HTTPException:
-        raise
-    except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=exc.errors()) from exc
-    except AppleStoreConfigError as exc:
-        logger.error("Apple Store configuration error: %s", exc)
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Failed to apply Apple import operations")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        delete_cached_product(APPLE_STORE, entry.product_id)
+        summary["deleted"] += 1
 
-    return {"status": "ok", "summary": summary}
+    status = "ok" if not summary["failed"] else "partial"
+    return {"status": status, "summary": summary}
 
 
 @app.get("/health")

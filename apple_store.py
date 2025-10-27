@@ -50,6 +50,8 @@ _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
 _INAPP_V2_ID_CACHE: Dict[str, Optional[str]] = {}
 _INAPP_V2_ID_BY_PRODUCT_ID: Dict[str, Optional[str]] = {}
 
+_LOCALIZATION_LIST_STRATEGY: Optional[str] = None
+
 
 _PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
 
@@ -397,7 +399,10 @@ def _is_forbidden_error(exc: Exception) -> bool:
 
 
 def list_inapp_purchases(
-    cursor: Optional[str] = None, limit: int = 200
+    cursor: Optional[str] = None,
+    limit: int = 200,
+    *,
+    include_relationships: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     global _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS, _INAPP_LIST_SUPPORTS_LIMIT_PARAM
 
@@ -442,7 +447,10 @@ def list_inapp_purchases(
             items: List[Dict[str, Any]] = []
             for record in response.get("data", []):
                 item = _canonicalize_record(
-                    record, localization_map, prices_map
+                    record,
+                    localization_map,
+                    prices_map,
+                    with_relationships=include_relationships,
                 )
                 resolved_id, resolved_type = _resolve_inapp_v2_identifier(
                     item.get("id"),
@@ -452,6 +460,8 @@ def list_inapp_purchases(
                 if resolved_id:
                     item["id"] = resolved_id
                 item["resourceType"] = resolved_type
+                if not include_relationships:
+                    item.pop("localizations", None)
                 items.append(item)
 
             next_cursor = _extract_cursor(response.get("links", {}).get("next"))
@@ -479,7 +489,9 @@ def list_inapp_purchases(
 
     items = []
     for record in response.get("data", []):
-        item = _canonicalize_record(record, {}, {})
+        item = _canonicalize_record(
+            record, {}, {}, with_relationships=include_relationships
+        )
         inapp_id, resource_type = _resolve_inapp_v2_identifier(
             item.get("id"),
             item.get("resourceType", "inAppPurchases"),
@@ -488,9 +500,12 @@ def list_inapp_purchases(
         if inapp_id:
             item["id"] = inapp_id
         item["resourceType"] = resource_type
-        item["localizations"] = _fetch_inapp_localizations(
-            inapp_id, resource_type
-        )
+        if include_relationships:
+            item["localizations"] = _fetch_inapp_localizations(
+                inapp_id, resource_type
+            )
+        else:
+            item.pop("localizations", None)
         item["prices"] = _fetch_inapp_prices(inapp_id, resource_type)
         items.append(item)
 
@@ -498,18 +513,28 @@ def list_inapp_purchases(
     return items, next_cursor
 
 
-def iterate_all_inapp_purchases(limit: int = 200) -> Iterable[Dict[str, Any]]:
+def iterate_all_inapp_purchases(
+    limit: int = 200, *, include_relationships: bool = True
+) -> Iterable[Dict[str, Any]]:
     cursor: Optional[str] = None
     while True:
-        items, cursor = list_inapp_purchases(cursor=cursor, limit=limit)
+        items, cursor = list_inapp_purchases(
+            cursor=cursor,
+            limit=limit,
+            include_relationships=include_relationships,
+        )
         for item in items:
             yield item
         if not cursor:
             break
 
 
-def get_all_inapp_purchases() -> List[Dict[str, Any]]:
-    return list(iterate_all_inapp_purchases())
+def get_all_inapp_purchases(
+    *, include_relationships: bool = True
+) -> List[Dict[str, Any]]:
+    return list(
+        iterate_all_inapp_purchases(include_relationships=include_relationships)
+    )
 
 
 def _index_included(included: Iterable[Dict[str, Any]], resource_type: str) -> Dict[str, Dict[str, Any]]:
@@ -565,35 +590,41 @@ def _canonicalize_record(
     record: Dict[str, Any],
     localization_map: Dict[str, Dict[str, Any]],
     prices_map: Dict[str, Dict[str, Any]],
+    *,
+    with_relationships: bool = True,
 ) -> Dict[str, Any]:
     attributes = record.get("attributes") or {}
     relationships = record.get("relationships") or {}
 
     localizations: Dict[str, Dict[str, str]] = {}
-    localization_relationship = relationships.get("inAppPurchaseLocalizations") or {}
-    for loc in localization_relationship.get("data", []) or []:
-        loc_id = loc.get("id")
-        if not loc_id:
-            continue
-        payload = localization_map.get(loc_id, {}).get("attributes", {})
-        locale = payload.get("locale")
-        if not locale:
-            continue
-        localizations[locale] = {
-            "name": payload.get("name", ""),
-            "description": payload.get("description", ""),
-        }
+    if with_relationships:
+        localization_relationship = (
+            relationships.get("inAppPurchaseLocalizations") or {}
+        )
+        for loc in localization_relationship.get("data", []) or []:
+            loc_id = loc.get("id")
+            if not loc_id:
+                continue
+            payload = localization_map.get(loc_id, {}).get("attributes", {})
+            locale = payload.get("locale")
+            if not locale:
+                continue
+            localizations[locale] = {
+                "name": payload.get("name", ""),
+                "description": payload.get("description", ""),
+            }
 
     prices: List[Dict[str, Any]] = []
-    prices_relationship = relationships.get("inAppPurchasePrices") or {}
-    for price_ref in prices_relationship.get("data", []) or []:
-        price_id = price_ref.get("id")
-        if not price_id:
-            continue
-        price_entry = prices_map.get(price_id) or price_ref
-        parsed_price = _parse_price_entry(price_entry)
-        if parsed_price:
-            prices.append(parsed_price)
+    if with_relationships:
+        prices_relationship = relationships.get("inAppPurchasePrices") or {}
+        for price_ref in prices_relationship.get("data", []) or []:
+            price_id = price_ref.get("id")
+            if not price_id:
+                continue
+            price_entry = prices_map.get(price_id) or price_ref
+            parsed_price = _parse_price_entry(price_entry)
+            if parsed_price:
+                prices.append(parsed_price)
 
     resolved_id = record.get("id", "")
     resolved_resource_type = record.get("type", "inAppPurchases")
@@ -717,7 +748,7 @@ def _resolve_inapp_v2_identifier(
 
 def _load_localization_entries_via_filter(
     inapp_id: str, resource_type: str
-) -> List[Dict[str, Any]]:
+) -> Optional[List[Dict[str, Any]]]:
     if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
         resource_type = "inAppPurchasesV2"
 
@@ -727,6 +758,7 @@ def _load_localization_entries_via_filter(
 
     for index, filter_key in enumerate(filter_keys):
         entries: List[Dict[str, Any]] = []
+        supported = False
         cursor: Optional[str] = None
 
         while True:
@@ -762,10 +794,13 @@ def _load_localization_entries_via_filter(
                         inapp_id,
                         filter_key,
                     )
-                    return entries
+                    if supported:
+                        return entries
+                    return None
                 raise
 
             entries.extend(_normalize_localization_entries(response.get("data")))
+            supported = True
 
             cursor = _extract_cursor(response.get("links", {}).get("next"))
             if not cursor:
@@ -773,7 +808,7 @@ def _load_localization_entries_via_filter(
 
         # Try next filter key if the current one was rejected
 
-    return []
+    return None
 
 
 def _load_localization_entries_v2(
@@ -828,9 +863,9 @@ def _load_localization_entries_v2(
     return None
 
 
-def _list_localization_entries(
+def _load_localizations_via_relationship(
     inapp_id: str, resource_type: str
-) -> List[Dict[str, Any]]:
+) -> Optional[List[Dict[str, Any]]]:
     if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
         resource_type = "inAppPurchasesV2"
 
@@ -842,6 +877,7 @@ def _list_localization_entries(
             0, f"/inAppPurchasesV2/{inapp_id}/inAppPurchaseLocalizations"
         )
 
+    success = False
     for path in candidates:
         try:
             response = _request("GET", path)
@@ -859,12 +895,48 @@ def _list_localization_entries(
                 path,
             )
         else:
+            success = True
             return _normalize_localization_entries(response.get("data"))
 
-    v2_entries = _load_localization_entries_v2(inapp_id, resource_type)
-    if v2_entries is not None:
-        return v2_entries
-    return _load_localization_entries_via_filter(inapp_id, resource_type)
+    if success:
+        return []
+    return None
+
+
+def _list_localization_entries(
+    inapp_id: str, resource_type: str
+) -> List[Dict[str, Any]]:
+    global _LOCALIZATION_LIST_STRATEGY
+
+    strategies = []
+    if _LOCALIZATION_LIST_STRATEGY:
+        strategies.append(_LOCALIZATION_LIST_STRATEGY)
+    strategies.extend(["relationship", "v2", "filter"])
+
+    seen: set[str] = set()
+    for strategy in strategies:
+        if strategy in seen:
+            continue
+        seen.add(strategy)
+
+        if strategy == "relationship":
+            entries = _load_localizations_via_relationship(inapp_id, resource_type)
+        elif strategy == "v2":
+            entries = _load_localization_entries_v2(inapp_id, resource_type)
+        elif strategy == "filter":
+            entries = _load_localization_entries_via_filter(inapp_id, resource_type)
+        else:
+            continue
+
+        if entries is None:
+            if _LOCALIZATION_LIST_STRATEGY == strategy:
+                _LOCALIZATION_LIST_STRATEGY = None
+            continue
+
+        _LOCALIZATION_LIST_STRATEGY = strategy
+        return entries
+
+    return []
 
 
 def _fetch_inapp_localizations(
@@ -1021,6 +1093,10 @@ def _get_inapp_purchase_snapshot(inapp_id: str) -> Dict[str, Any]:
     raise RuntimeError(
         "Apple API에서 인앱 상품 정보를 가져오지 못했습니다. 다시 시도해 주세요."
     )
+
+
+def get_inapp_purchase_detail(inapp_id: str) -> Dict[str, Any]:
+    return _get_inapp_purchase_snapshot(inapp_id)
 
 
 def _format_iso8601(date: Optional[str]) -> Optional[str]:
