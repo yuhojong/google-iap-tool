@@ -535,7 +535,9 @@ def _is_path_error(exc: Exception) -> bool:
     message = str(exc)
     if not message:
         return False
-    return "PATH_ERROR" in message or "The URL path is not valid" in message
+    if "PATH_ERROR" in message or "The URL path is not valid" in message:
+        return True
+    return "The path provided does not match a defined resource type" in message
 
 
 def _is_not_found_error(exc: Exception) -> bool:
@@ -545,6 +547,18 @@ def _is_not_found_error(exc: Exception) -> bool:
     if "NOT_FOUND" in message:
         return True
     return "There is no resource of type" in message
+
+
+def _should_disable_v2_detail_lookup(exc: Exception) -> bool:
+    message = str(exc)
+    if not message:
+        return False
+    markers = (
+        "The path provided does not match a defined resource type",
+        "There is no resource of type 'inAppPurchases' with id",
+        "There is no resource of type 'inAppPurchasesV2' with id",
+    )
+    return any(marker in message for marker in markers)
 
 
 def _is_forbidden_noop_error(exc: Exception) -> bool:
@@ -602,6 +616,8 @@ def list_inapp_purchases(
                 raise
         else:
             items: List[Dict[str, Any]] = []
+            had_lookup_failure = False
+            had_success = False
             for inapp_id, resource_type in identifiers:
                 try:
                     record = _get_inapp_purchase_snapshot(
@@ -614,6 +630,8 @@ def list_inapp_purchases(
                             inapp_id,
                             exc,
                         )
+                        if _INAPP_LIST_SUPPORTS_V2_ENDPOINT and _should_disable_v2_detail_lookup(exc):
+                            had_lookup_failure = True
                         continue
                     raise
 
@@ -622,6 +640,17 @@ def list_inapp_purchases(
                     record.pop("localizations", None)
                     record.pop("prices", None)
                 items.append(record)
+                had_success = True
+            if had_lookup_failure and not had_success:
+                logger.info(
+                    "Disabling inAppPurchasesV2 detail lookups after repeated errors."
+                )
+                _INAPP_LIST_SUPPORTS_V2_ENDPOINT = False
+                return list_inapp_purchases(
+                    cursor=cursor,
+                    limit=limit,
+                    include_relationships=include_relationships,
+                )
             return items, next_cursor
 
     endpoint = f"/apps/{_get_app_id()}/inAppPurchases"
