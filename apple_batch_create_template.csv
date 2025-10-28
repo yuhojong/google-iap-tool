@@ -1,0 +1,5 @@
+product_id,reference_name,type,price_tier,name_en-US,description_en-US,name_ko,description_ko
+com.example.coins100,100 Coins,consumable,1,100 Coins,Get 100 coins to use in the game,코인 100개,게임에서 사용할 수 있는 코인 100개를 획득하세요
+com.example.coins500,500 Coins,consumable,5,500 Coins,Get 500 coins to use in the game,코인 500개,게임에서 사용할 수 있는 코인 500개를 획득하세요
+com.example.premium,Premium Features,non_consumable,10,Premium Features,Unlock all premium features,프리미엄 기능,모든 프리미엄 기능을 잠금 해제하세요
+
