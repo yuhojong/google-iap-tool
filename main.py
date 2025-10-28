@@ -574,10 +574,24 @@ def _fetch_google_products() -> List[Dict[str, Any]]:
 
 
 def _fetch_apple_products() -> List[Dict[str, Any]]:
-    products, _ = get_all_inapp_purchases(include_relationships=False)
+    products, _ = get_all_inapp_purchases(include_relationships=True)
     for item in products:
-        if isinstance(item, dict):
-            item.pop("localizations", None)
+        if not isinstance(item, dict):
+            continue
+        localizations = item.get("localizations")
+        if isinstance(localizations, dict):
+            simplified: Dict[str, Dict[str, str]] = {}
+            for locale, payload in localizations.items():
+                if not isinstance(locale, str) or not locale:
+                    continue
+                if isinstance(payload, dict):
+                    name = str(payload.get("name") or "")
+                    description = str(payload.get("description") or "")
+                else:
+                    name = ""
+                    description = ""
+                simplified[locale] = {"name": name, "description": description}
+            item["localizations"] = simplified
     return products
 
 
@@ -653,6 +667,24 @@ def _to_apple_summary(product: Dict[str, Any]) -> Dict[str, Any]:
     price_tier = product.get("priceTier")
     if price_tier and "prices" not in summary:
         summary["prices"] = [{"priceTier": price_tier}]
+    localizations = product.get("localizations")
+    if isinstance(localizations, dict):
+        simplified_localizations: Dict[str, Dict[str, str]] = {}
+        for locale, payload in localizations.items():
+            if not isinstance(locale, str) or not locale:
+                continue
+            if isinstance(payload, dict):
+                name = str(payload.get("name") or "")
+                description = str(payload.get("description") or "")
+            else:
+                name = ""
+                description = ""
+            simplified_localizations[locale] = {
+                "name": name,
+                "description": description,
+            }
+        if simplified_localizations:
+            summary["localizations"] = simplified_localizations
     return summary
 
 
@@ -2035,12 +2067,12 @@ async def api_apple_list_inapp(
                     needs_refresh, added_ids, removed_ids = await _run_in_thread(
                         _check_apple_products_changed, cached_products
                     )
-                    
+
                     if needs_refresh:
                         # Perform incremental update if we know what changed
                         if added_ids is not None and removed_ids is not None:
                             logger.info("Performing incremental update...")
-                            
+
                             # Remove deleted IAPs from cache
                             if removed_ids:
                                 for product_id in removed_ids:
@@ -2051,44 +2083,59 @@ async def api_apple_list_inapp(
                                         logger.info("Removed deleted IAP from cache: %s", product_id)
                                     except Exception as exc:
                                         logger.warning("Failed to remove IAP %s from cache: %s", product_id, exc)
-                            
+
                             # Fetch only new IAPs in parallel
                             if added_ids:
                                 logger.info("Fetching %d new IAPs in parallel...", len(added_ids))
-                                
+
                                 # Use thread pool for parallel fetching
                                 import concurrent.futures
                                 import time
-                                
+
                                 def fetch_and_cache_iap(product_id: str) -> Tuple[bool, str, Optional[str]]:
                                     """Fetch and cache a single IAP. Returns (success, product_id, error)."""
                                     try:
                                         iap_detail = get_apple_inapp_purchase_detail(product_id)
-                                        # Remove localizations to match cached format
                                         if isinstance(iap_detail, dict):
-                                            iap_detail.pop("localizations", None)
+                                            localizations = iap_detail.get("localizations")
+                                            if isinstance(localizations, dict):
+                                                simplified: Dict[str, Dict[str, str]] = {}
+                                                for locale, payload in localizations.items():
+                                                    if not isinstance(locale, str) or not locale:
+                                                        continue
+                                                    if isinstance(payload, dict):
+                                                        name = str(payload.get("name") or "")
+                                                        description = str(payload.get("description") or "")
+                                                    else:
+                                                        name = ""
+                                                        description = ""
+                                                    simplified[locale] = {
+                                                        "name": name,
+                                                        "description": description,
+                                                    }
+                                                iap_detail["localizations"] = simplified
                                         upsert_cached_product(APPLE_STORE, iap_detail)
                                         return (True, product_id, None)
                                     except Exception as exc:
                                         return (False, product_id, str(exc))
-                                
+
                                 # Process in batches to avoid rate limits
                                 added_list = list(added_ids)
                                 batch_size = 30
                                 max_workers = 3
                                 success_count = 0
                                 failed_count = 0
-                                
+
                                 for batch_start in range(0, len(added_list), batch_size):
                                     batch_end = min(batch_start + batch_size, len(added_list))
                                     batch = added_list[batch_start:batch_end]
                                     remaining = len(added_list) - batch_end
-                                    
+
                                     logger.info(
                                         "Processing batch %d-%d of %d new IAPs (%d remaining)",
                                         batch_start + 1, batch_end, len(added_list), remaining
                                     )
-                                    
+
                                     # Fetch batch in parallel
                                     batch_results = await _run_in_thread(
                                         lambda: list(
@@ -2097,7 +2144,7 @@ async def api_apple_list_inapp(
                                             )
                                         )
                                     )
-                                    
+
                                     # Process results
                                     for success, product_id, error in batch_results:
                                         if success:
@@ -2106,11 +2153,11 @@ async def api_apple_list_inapp(
                                         else:
                                             failed_count += 1
                                             logger.warning("Failed to fetch new IAP %s: %s", product_id, error)
-                                    
+
                                     # Delay between batches to avoid rate limits
                                     if batch_end < len(added_list):
                                         time.sleep(1.0)
-                                
+
                                 logger.info(
                                     "Incremental update complete: %d added, %d failed",
                                     success_count, failed_count
@@ -2118,9 +2165,9 @@ async def api_apple_list_inapp(
                         else:
                             # Unknown changes, do full refresh
                             logger.info("Changes detected, performing full refresh")
-                await _run_in_thread(
-                    refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
-                )
+                            await _run_in_thread(
+                                refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
+                            )
                     else:
                         logger.info("No changes detected, using cached data")
                 else:
