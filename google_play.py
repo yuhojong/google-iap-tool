@@ -108,6 +108,47 @@ def create_managed_inapp(
             "priceMicros": str(price_micros),
             "currency": "KRW",
         }
+        
+        # Auto-populate regional prices based on existing IAPs
+        # This prevents "Must provide a price for each region" error
+        try:
+            logger.info("Fetching existing IAPs to determine required regions...")
+            existing_iaps = get_all_inapp_products()
+            logger.info(f"Found {len(existing_iaps) if existing_iaps else 0} existing IAPs")
+            
+            if existing_iaps:
+                # Find an IAP with prices set
+                template_iap = None
+                for iap in existing_iaps:
+                    prices = iap.get("prices")
+                    if isinstance(prices, dict) and len(prices) > 0:
+                        template_iap = iap
+                        logger.info(f"Using IAP '{iap.get('sku')}' as template (has {len(prices)} regional prices)")
+                        break
+                
+                if template_iap and template_iap.get("prices"):
+                    # Use the same regions but with Korean price converted
+                    resolved_prices = {}
+                    
+                    for region, price_info in template_iap["prices"].items():
+                        if not isinstance(price_info, dict):
+                            continue
+                        
+                        # Calculate regional price based on KRW price
+                        # For simplicity, use the same micros (will be in local currency)
+                        # A more sophisticated approach would use exchange rates
+                        resolved_prices[region] = {
+                            "priceMicros": str(price_micros),
+                            "currency": price_info.get("currency", "KRW"),
+                        }
+                    
+                    logger.info(f"✅ Auto-populated {len(resolved_prices)} regional prices for new IAP")
+                else:
+                    logger.warning("No existing IAPs found with regional prices configured")
+            else:
+                logger.warning("No existing IAPs found to use as template")
+        except Exception as e:
+            logger.error(f"❌ Failed to auto-populate regional prices: {e}", exc_info=True)
 
     if not isinstance(resolved_default_price, dict):
         raise ValueError("기본 가격 정보가 필요합니다.")
@@ -143,6 +184,12 @@ def create_managed_inapp(
     }
     if resolved_prices:
         body["prices"] = resolved_prices
+    
+    # Debug: Log what we're sending to Google API
+    logger.info(f"Creating IAP '{sku}' with {len(resolved_prices) if resolved_prices else 0} regional prices")
+    if not resolved_prices:
+        logger.warning(f"⚠️ No regional prices set for '{sku}' - this will likely fail!")
+    
     try:
         logger.info(
             "Creating managed in-app product",

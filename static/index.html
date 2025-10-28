@@ -751,7 +751,7 @@
                     <button type="button" id="apple-refresh-btn">목록 새로고침</button>
                 </div>
                 <div id="apple-status" class="status"></div>
-                <div class="initial-loading" id="apple-loading" hidden>
+                <div class="initial-loading" id="apple-loading" hidden style="position: relative; z-index: 10; background: white; padding: 10px; margin-bottom: 10px;">
                     <p class="hint">Apple 인앱 상품을 불러오는 중입니다...</p>
                     <div class="progress-bar"><div class="progress-bar-fill" id="apple-loading-bar"></div></div>
                 </div>
@@ -1992,7 +1992,18 @@
                         : err.detail;
                     throw new Error(detail || '변경 사항 적용에 실패했습니다.');
                 }
-                importStatusEl.textContent = '변경 사항이 적용되었습니다.';
+                const result = await res.json();
+                
+                // Show summary with failed items if any
+                if (result.failed_items && result.failed_items.length > 0) {
+                    const failedSummary = result.failed_items.map(item => 
+                        `행 ${item.row}: ${item.sku} (${item.error})`
+                    ).join('\n');
+                    importStatusEl.textContent = `일부 항목 적용 실패:\n${failedSummary}\n\n성공: ${result.summary.create}개 생성, ${result.summary.update}개 수정, ${result.summary.delete}개 삭제`;
+                } else {
+                    importStatusEl.textContent = '변경 사항이 적용되었습니다.';
+                }
+                
                 pendingOperations = [];
                 renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, importPreviewEl);
                 if (importFileInput) {
@@ -2120,7 +2131,18 @@
                         : err.detail;
                     throw new Error(detail || '신규 상품 등록에 실패했습니다.');
                 }
-                newImportStatusEl.textContent = '신규 상품을 등록했습니다.';
+                const result = await res.json();
+                
+                // Show summary with failed items if any
+                if (result.failed_items && result.failed_items.length > 0) {
+                    const failedSummary = result.failed_items.map(item => 
+                        `행 ${item.row}: ${item.sku} (${item.error})`
+                    ).join('\n');
+                    newImportStatusEl.textContent = `일부 상품 등록 실패:\n${failedSummary}\n\n성공: ${result.summary.create}개 등록`;
+                } else {
+                    newImportStatusEl.textContent = '신규 상품을 등록했습니다.';
+                }
+                
                 pendingNewOperations = [];
                 renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, newImportPreviewEl);
                 if (newImportFileInput) {
@@ -2438,6 +2460,13 @@
             items: [],
             priceTiersTerritory: '',
             priceTiers: [],
+            backgroundFetch: {
+                active: false,
+                abortController: null,
+                items: [],
+                totalCount: null,
+                processedItems: new Set()
+            }
         };
         let appleBulkDeleteMatches = [];
 
@@ -2638,6 +2667,7 @@
                 appleEmptyState.hidden = false;
                 return;
             }
+            // Show table immediately when we have data
             appleTableWrapper.hidden = false;
             appleEmptyState.hidden = true;
             items.forEach((item) => {
@@ -2709,19 +2739,51 @@
         }
 
         async function fetchAppleList(options = {}) {
+            // Cancel any existing background fetch
+            if (appleState.backgroundFetch.active && appleState.backgroundFetch.abortController) {
+                appleState.backgroundFetch.abortController.abort();
+            }
+            
+            // Initialize new fetch
+            const abortController = new AbortController();
+            appleState.backgroundFetch.abortController = abortController;
+            appleState.backgroundFetch.active = true;
+            appleState.backgroundFetch.items = [];
+            appleState.backgroundFetch.processedItems = new Set();
+            appleState.backgroundFetch.totalCount = null;
+            
             if (appleLoadingEl) appleLoadingEl.hidden = false;
-            if (appleLoadingBar) appleLoadingBar.style.width = '40%';
-            if (appleStatusEl) appleStatusEl.textContent = 'Apple 인앱 상품을 불러오는 중입니다...';
+            if (appleLoadingBar) appleLoadingBar.style.width = '10%';
+            if (appleStatusEl) appleStatusEl.textContent = 'Apple 인앱 상품 목록 확인 중...';
+            
+            // For refresh requests, show initial checking status
+            let initialCheckComplete = false;
+            
             const refresh = Boolean(options.refresh);
-            const items = [];
+            let items = [];
             let token;
+            let totalCount = null;
+            let pageNum = 0;
+            let processedItems = new Set();
+            
             try {
                 do {
+                    // Check if aborted
+                    if (abortController.signal.aborted) {
+                        console.log('Apple fetch aborted');
+                        break;
+                    }
+                    
+                    pageNum++;
                     const params = new URLSearchParams();
                     params.set('page_size', '200');
                     if (token) params.set('token', token);
                     if (refresh && !token) params.set('refresh', 'true');
-                    const res = await fetch(`/api/apple/inapp/list?${params.toString()}`);
+                    
+                    const res = await fetch(`/api/apple/inapp/list?${params.toString()}`, {
+                        signal: abortController.signal
+                    });
+                    
                     if (!res.ok) {
                         const err = await res.json().catch(() => ({}));
                         const detail = Array.isArray(err.detail)
@@ -2729,30 +2791,163 @@
                             : err.detail || err.message;
                         throw new Error(detail || 'Apple 인앱 상품을 불러오지 못했습니다.');
                     }
+                    
                     const data = await res.json();
-                    items.push(...(data.items || []));
+                    const newItems = data.items || [];
+                    
+                    // Mark initial check as complete after first response
+                    if (!initialCheckComplete && refresh && pageNum === 1) {
+                        initialCheckComplete = true;
+                        if (appleStatusEl) appleStatusEl.textContent = 'Apple 인앱 상품을 불러오는 중...';
+                    }
+                    
+                    console.log(`Received ${newItems.length} items from API, page ${pageNum}`);
+                    
+                    // Filter out duplicates
+                    const uniqueNewItems = newItems.filter(item => {
+                        const id = item.id || item.sku || item.productId;
+                        if (!id || processedItems.has(id)) return false;
+                        processedItems.add(id);
+                        return true;
+                    });
+                    
+                    items.push(...uniqueNewItems);
+                    
+                    // Update background fetch state
+                    appleState.backgroundFetch.items = items;
+                    appleState.backgroundFetch.processedItems = processedItems;
+                    
+                    // Log progress with items remaining
+                    if (totalCount) {
+                        const remaining = totalCount - items.length;
+                        console.log(`Total items so far: ${items.length}/${totalCount} (${remaining} remaining)`);
+                    } else {
+                        console.log(`Total items so far: ${items.length}`);
+                    }
+                    
+                    // Show table immediately when we have first batch
+                    if (items.length > 0) {
+                        if (appleTableWrapper) {
+                            console.log(`Table wrapper hidden status: ${appleTableWrapper.hidden}`);
+                            appleTableWrapper.hidden = false;
+                            console.log(`Table wrapper hidden status after unhide: ${appleTableWrapper.hidden}`);
+                        }
+                        if (appleEmptyState && !appleEmptyState.hidden) {
+                            appleEmptyState.hidden = true;
+                        }
+                    }
+                    
+                    // Update total count if available
+                    if (data.totalCount !== undefined && data.totalCount !== null) {
+                        totalCount = data.totalCount;
+                        appleState.backgroundFetch.totalCount = totalCount;
+                        console.log(`Total count from API: ${totalCount}`);
+                    }
+                    
+                    // If we got items on first page with refresh, it means incremental update completed
+                    // Show progress as if we're fetching from cache
+                    if (refresh && pageNum === 1 && newItems.length > 0 && totalCount) {
+                        const percent = Math.min(95, Math.round((newItems.length / totalCount) * 100));
+                        if (appleLoadingBar) appleLoadingBar.style.width = `${percent}%`;
+                        if (appleStatusEl) {
+                            appleStatusEl.textContent = `Apple 인앱 상품 ${newItems.length}/${totalCount}개 불러옴`;
+                        }
+                    }
+                    
+                    // Update progress bar and status (only if on Apple section)
+                    const isOnAppleSection = !storePanes.get('apple')?.hidden;
+                    if (isOnAppleSection) {
+                        if (totalCount) {
+                            // Show progress based on actual items fetched vs total
+                            const percent = Math.min(95, Math.round((items.length / totalCount) * 100));
+                            const remaining = totalCount - items.length;
+                            if (appleLoadingBar) appleLoadingBar.style.width = `${percent}%`;
+                            if (appleStatusEl) appleStatusEl.textContent = `Apple 인앱 상품을 불러오는 중... ${items.length}/${totalCount}개 (${remaining}개 남음, ${percent}%)`;
+                        } else {
+                            // Estimate based on page number when total is unknown
+                            const estimatedPercent = Math.min(95, pageNum * 10);
+                            if (appleLoadingBar) appleLoadingBar.style.width = `${estimatedPercent}%`;
+                            if (appleStatusEl) appleStatusEl.textContent = `Apple 인앱 상품을 불러오는 중... (${items.length}개 불러옴)`;
+                        }
+                    } else {
+                        // Update background fetch status even when not visible
+                        if (totalCount) {
+                            const percent = Math.min(95, Math.round((items.length / totalCount) * 100));
+                            const remaining = totalCount - items.length;
+                            console.log(`Background fetch progress: ${items.length}/${totalCount} (${remaining} remaining, ${percent}%)`);
+                        }
+                    }
+                    
+                    // Update table incrementally
+                    appleState.items = items;
+                    if (isOnAppleSection) {
+                        renderAppleTable(items);
+                    }
+                    
                     token = data.nextPageToken || null;
+                    
+                    // Small delay between pages to avoid overwhelming the server
+                    if (token) {
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
                 } while (token);
+                
+                // Final update
                 appleState.items = items;
-                renderAppleTable(items);
-                if (appleStatusEl) {
-                    appleStatusEl.textContent = `총 ${items.length}개의 Apple 인앱 상품을 불러왔습니다.`;
+                appleState.backgroundFetch.active = false;
+                
+                // Only update UI if still on Apple section
+                const isOnAppleSection = !storePanes.get('apple')?.hidden;
+                if (isOnAppleSection) {
+                    renderAppleTable(items);
+                    if (appleStatusEl) {
+                        if (totalCount) {
+                            appleStatusEl.textContent = `총 ${items.length}/${totalCount}개의 Apple 인앱 상품을 불러왔습니다. (100%)`;
+                        } else {
+                            appleStatusEl.textContent = `총 ${items.length}개의 Apple 인앱 상품을 불러왔습니다.`;
+                        }
+                    }
                 }
+                
+                console.log(`Fetch complete: ${items.length}${totalCount ? `/${totalCount}` : ''} items`);
             } catch (error) {
-                appleState.items = [];
-                renderAppleTable([]);
-                if (appleStatusEl) {
-                    appleStatusEl.textContent = error.message;
+                if (error.name === 'AbortError') {
+                    console.log('Fetch aborted by user');
+                    return;
                 }
+                
+                appleState.items = items.length > 0 ? items : [];
+                appleState.backgroundFetch.active = false;
+                
+                const isOnAppleSection = !storePanes.get('apple')?.hidden;
+                if (isOnAppleSection) {
+                    renderAppleTable(appleState.items);
+                    if (appleStatusEl) {
+                        const partialInfo = items.length > 0 ? ` (${items.length}개 불러옴)` : '';
+                        appleStatusEl.textContent = error.message + partialInfo;
+                    }
+                }
+                
+                console.error('Fetch error:', error.message, `- ${items.length} items fetched`);
             } finally {
-                if (appleLoadingBar) {
-                    appleLoadingBar.style.width = '100%';
-                    setTimeout(() => {
-                        if (appleLoadingEl) appleLoadingEl.hidden = true;
-                        if (appleLoadingBar) appleLoadingBar.style.width = '0%';
-                    }, 400);
-                } else if (appleLoadingEl) {
-                    appleLoadingEl.hidden = true;
+                appleState.backgroundFetch.active = false;
+                
+                // Hide loading indicator (only if on Apple section)
+                const isOnAppleSection = !storePanes.get('apple')?.hidden;
+                if (isOnAppleSection) {
+                    if (appleLoadingBar) {
+                        appleLoadingBar.style.opacity = '1';
+                        appleLoadingBar.style.width = '100%';
+                        setTimeout(() => {
+                            if (appleLoadingEl) appleLoadingEl.hidden = true;
+                            if (appleLoadingBar) {
+                                appleLoadingBar.style.width = '0%';
+                                appleLoadingBar.style.opacity = '1';
+                            }
+                        }, 400);
+                    } else if (appleLoadingEl) {
+                        appleLoadingEl.hidden = true;
+                    }
                 }
             }
         }
@@ -2764,6 +2959,10 @@
                 if (appleFormStatus) appleFormStatus.textContent = '상품 ID를 확인할 수 없습니다.';
                 return;
             }
+            
+            // Switch to form section
+            setActiveSection('apple', 'apple-section-form');
+            
             appleForm.dataset.mode = 'edit';
             appleForm.dataset.productId = productId;
             if (appleProductIdInput) {
@@ -3116,6 +3315,25 @@
                 resetAppleForm();
             });
         }
+
+        // Suppress browser extension errors that don't affect app functionality
+        window.addEventListener('error', function(e) {
+            // Suppress "message channel closed" errors from browser extensions
+            if (e.message && e.message.includes('message channel closed')) {
+                e.stopImmediatePropagation();
+                e.preventDefault();
+                return false;
+            }
+        });
+        
+        window.addEventListener('unhandledrejection', function(e) {
+            // Suppress promise rejection errors from browser extensions
+            if (e.reason && e.reason.message && e.reason.message.includes('message channel closed')) {
+                e.stopImmediatePropagation();
+                e.preventDefault();
+                return false;
+            }
+        });
 
         appleRefreshBtn?.addEventListener('click', () => fetchAppleList({ refresh: true }));
         appleBulkDeletePreviewBtn?.addEventListener('click', handleAppleBulkDeletePreview);

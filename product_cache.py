@@ -28,7 +28,37 @@ def _serialize_product(product: Dict[str, Any]) -> str:
 
 
 def _hash_product(product: Dict[str, Any]) -> str:
-    payload = _serialize_product(product)
+    """
+    Generate a stable hash for a product by excluding fields that may change
+    between API fetches (timestamps, dynamic metadata, etc.).
+    """
+    # Create a copy and exclude dynamic/unstable fields
+    stable_product = product.copy()
+    
+    # Fields to exclude from hash calculation (may change without actual product updates)
+    exclude_fields = {
+        "updated_at", "lastModified", "createdDate", "modifiedDate",
+        "links", "meta", "relationships"
+    }
+    
+    for field in exclude_fields:
+        stable_product.pop(field, None)
+    
+    # For price data, only compare essential fields (tier, territory, status)
+    # Exclude price amounts/dates that might be updated server-side
+    if "prices" in stable_product and isinstance(stable_product["prices"], list):
+        stable_prices = []
+        for price in stable_product["prices"]:
+            if isinstance(price, dict):
+                stable_price = {
+                    "territory": price.get("territory"),
+                    "priceTier": price.get("priceTier"),
+                    "clearedForSale": price.get("clearedForSale")
+                }
+                stable_prices.append(stable_price)
+        stable_product["prices"] = stable_prices
+    
+    payload = _serialize_product(stable_product)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -99,7 +129,7 @@ def _load_cached_products(conn: sqlite3.Connection, store: str) -> List[Dict[str
     return products
 
 
-def _replace_products(conn: sqlite3.Connection, store: str, products: List[Dict[str, Any]]) -> None:
+def _replace_products(conn: sqlite3.Connection, store: str, products: List[Dict[str, Any]], incremental: bool = False) -> None:
     existing_hashes = {
         row["sku"]: row["hash"]
         for row in conn.execute(
@@ -109,29 +139,59 @@ def _replace_products(conn: sqlite3.Connection, store: str, products: List[Dict[
     }
     incoming_hashes = {}
     now = time.time()
+    updates_count = 0
+    inserts_count = 0
+    skips_count = 0
+    
     for product in products:
         sku = product.get("sku")
         if not sku:
             continue
         digest = _hash_product(product)
         incoming_hashes[sku] = digest
-        if existing_hashes.get(sku) == digest:
+        existing_hash = existing_hashes.get(sku)
+        
+        if existing_hash == digest:
+            skips_count += 1
             continue
-        conn.execute(
-            """
-            INSERT INTO products(store, sku, data, hash, updated_at)
-            VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(store, sku) DO UPDATE SET data=excluded.data, hash=excluded.hash, updated_at=excluded.updated_at
-            """,
-            (store, sku, _serialize_product(product), digest, now),
-        )
+        
+        if existing_hash is not None:
+            # Update existing product
+            conn.execute(
+                """
+                UPDATE products SET data=?, hash=?, updated_at=?
+                WHERE store = ? AND sku = ?
+                """,
+                (_serialize_product(product), digest, now, store, sku),
+            )
+            updates_count += 1
+        else:
+            # Insert new product
+            conn.execute(
+                """
+                INSERT INTO products(store, sku, data, hash, updated_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (store, sku, _serialize_product(product), digest, now),
+            )
+            inserts_count += 1
+    
     removed = set(existing_hashes.keys()) - set(incoming_hashes.keys())
+    removed_count = 0
     if removed:
         conn.executemany(
             "DELETE FROM products WHERE store = ? AND sku = ?",
             ((store, sku) for sku in removed),
         )
+        removed_count = len(removed)
+    
     _update_last_sync(conn, store, now)
+    
+    if incremental and (updates_count > 0 or inserts_count > 0 or removed_count > 0):
+        logger.info(
+            "Cache updated: %d new, %d updated, %d removed, %d unchanged",
+            inserts_count, updates_count, removed_count, skips_count
+        )
 
 
 def refresh_products_from_remote(
@@ -140,7 +200,7 @@ def refresh_products_from_remote(
     with _lock:
         products = fetch_remote()
         with _get_connection() as conn:
-            _replace_products(conn, store, products)
+            _replace_products(conn, store, products, incremental=True)
         logger.info("Refreshed product cache from remote", extra={"count": len(products)})
         return products
 

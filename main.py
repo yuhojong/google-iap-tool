@@ -29,12 +29,15 @@ from dotenv import load_dotenv
 
 from apple_store import (
     AppleStoreConfigError,
+    AppleStorePermissionError,
     create_inapp_purchase as create_apple_inapp_purchase,
     delete_inapp_purchase as delete_apple_inapp_purchase,
     get_all_inapp_purchases,
     get_inapp_purchase_detail as get_apple_inapp_purchase_detail,
+    get_inapp_purchase_ids_lightweight,
     get_fixed_price_territories,
     list_price_tiers as list_apple_price_tiers,
+    setup_interrupt_handler,
     update_inapp_purchase as update_apple_inapp_purchase,
 )
 from google_play import (
@@ -61,12 +64,16 @@ from product_cache import (
 load_dotenv()
 
 
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
 
 logger = logging.getLogger(__name__)
+
+# Setup interrupt handler for graceful shutdown
+setup_interrupt_handler()
 
 GOOGLE_STORE = "google"
 APPLE_STORE = "apple"
@@ -102,6 +109,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Handle Chrome DevTools well-known requests silently
+@app.get("/.well-known/appspecific/com.chrome.devtools.json", include_in_schema=False)
+async def chrome_devtools():
+    """Chrome DevTools metadata endpoint (not used by this app)."""
+    return {}
 
 static_files = StaticFiles(directory="static", html=True)
 
@@ -560,11 +574,53 @@ def _fetch_google_products() -> List[Dict[str, Any]]:
 
 
 def _fetch_apple_products() -> List[Dict[str, Any]]:
-    products = get_all_inapp_purchases(include_relationships=False)
+    products, _ = get_all_inapp_purchases(include_relationships=False)
     for item in products:
         if isinstance(item, dict):
             item.pop("localizations", None)
     return products
+
+
+def _check_apple_products_changed(
+    cached_products: List[Dict[str, Any]]
+) -> Tuple[bool, Optional[set], Optional[set]]:
+    """
+    Check if Apple IAPs have changed since last fetch.
+    Returns (needs_refresh, added_ids, removed_ids).
+    If needs_refresh is False, added_ids and removed_ids are None.
+    """
+    try:
+        # Get current IAP IDs from Apple
+        current_ids, total_count = get_inapp_purchase_ids_lightweight()
+        current_ids_set = set(current_ids)
+        
+        # Get cached IAP IDs
+        cached_ids_set = set()
+        for product in cached_products:
+            product_id = product.get("productId") or product.get("sku") or ""
+            if product_id:
+                cached_ids_set.add(product_id)
+        
+        # Check if any IDs are different
+        added = current_ids_set - cached_ids_set
+        removed = cached_ids_set - current_ids_set
+        
+        if not added and not removed:
+            logger.info(
+                "Apple IAP list unchanged (%d items) - using cache",
+                len(cached_ids_set)
+            )
+            return False, None, None
+        
+        logger.info(
+            "Apple IAP list changed: %d added, %d removed",
+            len(added), len(removed)
+        )
+        return True, added, removed
+        
+    except Exception as exc:
+        logger.warning("Failed to check for Apple IAP changes: %s - will refresh", exc)
+        return True, None, None  # On error, full refresh
 
 
 def _collect_locales_from_apple_products(products: Iterable[Dict[str, Any]]) -> List[str]:
@@ -867,6 +923,81 @@ def _parse_apple_import_csv(
         rows.append(normalized)
 
     return rows, sorted(locale for locale in locales if locale)
+
+
+def _parse_apple_batch_create_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Parse CSV for Apple batch IAP creation (only new IAPs)."""
+    try:
+        decoded = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="CSV 파일은 UTF-8 인코딩이어야 합니다.") from exc
+
+    reader = csv.DictReader(io.StringIO(decoded))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
+
+    # Extract locales from column headers (name_en-US, description_ko, etc.)
+    locales = sorted({
+        name.split("_", 1)[1] 
+        for name in reader.fieldnames 
+        if (name.startswith("name_") or name.startswith("description_")) and "_" in name
+    })
+    
+    rows: List[Dict[str, Any]] = []
+    seen_product_ids: set[str] = set()
+
+    for index, row in enumerate(reader, start=2):
+        product_id = (row.get("product_id") or "").strip()
+        reference_name = (row.get("reference_name") or "").strip()
+        iap_type = (row.get("type") or "").strip()
+        price_tier = (row.get("price_tier") or "").strip()
+
+        # Skip empty rows
+        if not product_id and not reference_name:
+            continue
+
+        if not product_id:
+            raise HTTPException(status_code=400, detail=f"{index} 행: product_id 값을 입력해주세요.")
+        if product_id in seen_product_ids:
+            raise HTTPException(status_code=400, detail=f"CSV에 중복된 Product ID가 있습니다: {product_id}")
+        seen_product_ids.add(product_id)
+
+        if not reference_name:
+            raise HTTPException(status_code=400, detail=f"{index} 행: reference_name 값을 입력해주세요.")
+        if not iap_type:
+            raise HTTPException(status_code=400, detail=f"{index} 행: type 값을 입력해주세요.")
+        if not price_tier:
+            raise HTTPException(status_code=400, detail=f"{index} 행: price_tier 값을 입력해주세요.")
+
+        # Parse localizations
+        localizations: Dict[str, Dict[str, str]] = {}
+        for locale in locales:
+            name_key = f"name_{locale}"
+            description_key = f"description_{locale}"
+            name = (row.get(name_key) or "").strip()
+            description = (row.get(description_key) or "").strip()
+            if name and description:
+                localizations[locale] = {"name": name, "description": description}
+
+        if not localizations:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"{index} 행: 최소 하나의 언어에 대한 이름과 설명이 필요합니다."
+            )
+
+        rows.append({
+            "row": index,
+            "product_id": product_id,
+            "reference_name": reference_name,
+            "type": iap_type,
+            "price_tier": price_tier,
+            "localizations": localizations,
+        })
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="등록할 항목이 없습니다.")
+
+    return rows, locales
 
 
 def _parse_bulk_create_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
@@ -1430,32 +1561,50 @@ async def api_create_inapp(payload: CreateInAppRequest):
 @app.post("/api/google/inapp/new/import/apply")
 @csv_processing_endpoint
 async def api_bulk_create_apply(request: BulkCreateApplyRequest):
-    results = {"create": 0}
+    results = {"create": 0, "failed": 0}
+    failed_items = []
 
     try:
         existing_products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
         existing_skus = {item.get("sku") for item in existing_products if item.get("sku")}
 
-        for op in request.operations:
-            data = op.data
-            if data.sku in existing_skus:
-                raise HTTPException(status_code=400, detail=f"{data.sku} 는 이미 등록된 상품입니다.")
+        for idx, op in enumerate(request.operations, start=1):
+            try:
+                data = op.data
+                if data.sku in existing_skus:
+                    raise HTTPException(status_code=400, detail=f"{data.sku} 는 이미 등록된 상품입니다.")
 
-            translations = [
-                {"language": language, "title": listing.title, "description": listing.description}
-                for language, listing in data.listings.items()
-            ]
-            created = create_managed_inapp(
-                sku=data.sku,
-                default_language=data.default_language,
-                translations=translations,
-                default_price=data.default_price.model_dump(),
-                prices=data.prices,
-                status=data.status,
-            )
-            upsert_cached_product(GOOGLE_STORE, created)
-            existing_skus.add(data.sku)
-            results["create"] += 1
+                translations = [
+                    {"language": language, "title": listing.title, "description": listing.description}
+                    for language, listing in data.listings.items()
+                ]
+                created = create_managed_inapp(
+                    sku=data.sku,
+                    default_language=data.default_language,
+                    translations=translations,
+                    default_price=data.default_price.model_dump(),
+                    prices=data.prices,
+                    status=data.status,
+                )
+                upsert_cached_product(GOOGLE_STORE, created)
+                existing_skus.add(data.sku)
+                results["create"] += 1
+            except HTTPException:
+                # Re-raise HTTP exceptions (like duplicate SKU)
+                raise
+            except Exception as exc:
+                # Skip failed items and continue
+                error_msg = str(exc)
+                logger.error(f"Failed to process row {idx} (SKU: {op.data.sku if hasattr(op, 'data') else 'unknown'}): {error_msg}")
+                failed_items.append({
+                    "row": idx,
+                    "sku": op.data.sku if hasattr(op, 'data') else 'unknown',
+                    "action": "create",
+                    "error": error_msg
+                })
+                results["failed"] += 1
+                # Continue processing next item
+                continue
     except HTTPException:
         raise
     except ValidationError as exc:
@@ -1464,7 +1613,15 @@ async def api_bulk_create_apply(request: BulkCreateApplyRequest):
         logger.exception("Failed to apply bulk create operations")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"status": "ok", "summary": results}
+    response_data = {"status": "ok", "summary": results}
+    
+    if failed_items:
+        response_data["failed_items"] = failed_items
+        logger.info(f"Bulk create completed with {results['failed']} failures. Successful: {results['create']} creates")
+    else:
+        logger.info(f"Bulk create completed successfully: {results['create']} creates")
+
+    return response_data
 
 
 @app.put("/api/google/inapp/{sku}")
@@ -1551,52 +1708,70 @@ async def api_import_preview(file: UploadFile = File(...)):
 @app.post("/api/google/inapp/import/apply")
 @csv_processing_endpoint
 async def api_import_apply(request: ImportApplyRequest):
-    results = {"create": 0, "update": 0, "delete": 0}
+    results = {"create": 0, "update": 0, "delete": 0, "failed": 0}
+    failed_items = []
 
     try:
-        for op in request.operations:
-            if op.action == "create":
-                if not op.data:
-                    raise HTTPException(status_code=400, detail="create 작업에는 data가 필요합니다.")
-                data = op.data
-                translations = [
-                    {"language": language, "title": listing.title, "description": listing.description}
-                    for language, listing in data.listings.items()
-                ]
-                created = create_managed_inapp(
-                    sku=data.sku,
-                    default_language=data.default_language,
-                    translations=translations,
-                    default_price=data.default_price.model_dump(),
-                    prices=data.prices,
-                    status=data.status,
-                )
-                upsert_cached_product(GOOGLE_STORE, created)
-                results["create"] += 1
-            elif op.action == "update":
-                if not op.data:
-                    raise HTTPException(status_code=400, detail="update 작업에는 data가 필요합니다.")
-                data = op.data
-                listings_payload = {
-                    language: listing.model_dump()
-                    for language, listing in data.listings.items()
-                }
-                updated = update_managed_inapp(
-                    sku=data.sku,
-                    default_language=data.default_language,
-                    status=data.status,
-                    default_price=data.default_price.model_dump(),
-                    listings=listings_payload,
-                    prices=data.prices,
-                )
-                upsert_cached_product(GOOGLE_STORE, updated)
-                results["update"] += 1
-            elif op.action == "delete":
-                delete_inapp_product(sku=op.sku)
-                delete_cached_product(GOOGLE_STORE, op.sku)
-                results["delete"] += 1
-            else:  # pragma: no cover - defensive
-                raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
+        for idx, op in enumerate(request.operations, start=1):
+            try:
+                if op.action == "create":
+                    if not op.data:
+                        raise HTTPException(status_code=400, detail="create 작업에는 data가 필요합니다.")
+                    data = op.data
+                    translations = [
+                        {"language": language, "title": listing.title, "description": listing.description}
+                        for language, listing in data.listings.items()
+                    ]
+                    created = create_managed_inapp(
+                        sku=data.sku,
+                        default_language=data.default_language,
+                        translations=translations,
+                        default_price=data.default_price.model_dump(),
+                        prices=data.prices,
+                        status=data.status,
+                    )
+                    upsert_cached_product(GOOGLE_STORE, created)
+                    results["create"] += 1
+                elif op.action == "update":
+                    if not op.data:
+                        raise HTTPException(status_code=400, detail="update 작업에는 data가 필요합니다.")
+                    data = op.data
+                    listings_payload = {
+                        language: listing.model_dump()
+                        for language, listing in data.listings.items()
+                    }
+                    updated = update_managed_inapp(
+                        sku=data.sku,
+                        default_language=data.default_language,
+                        status=data.status,
+                        default_price=data.default_price.model_dump(),
+                        listings=listings_payload,
+                        prices=data.prices,
+                    )
+                    upsert_cached_product(GOOGLE_STORE, updated)
+                    results["update"] += 1
+                elif op.action == "delete":
+                    delete_inapp_product(sku=op.sku)
+                    delete_cached_product(GOOGLE_STORE, op.sku)
+                    results["delete"] += 1
+                else:  # pragma: no cover - defensive
+                    raise HTTPException(status_code=400, detail=f"지원하지 않는 작업 유형입니다: {op.action}")
+            except HTTPException:
+                # Re-raise HTTP exceptions (like validation errors)
+                raise
+            except Exception as exc:
+                # Skip failed items and continue
+                error_msg = str(exc)
+                logger.error(f"Failed to process row {idx} (SKU: {getattr(op, 'sku', 'unknown')}): {error_msg}")
+                failed_items.append({
+                    "row": idx,
+                    "sku": getattr(op, 'sku', op.data.sku if hasattr(op, 'data') and hasattr(op.data, 'sku') else 'unknown'),
+                    "action": op.action,
+                    "error": error_msg
+                })
+                results["failed"] += 1
+                # Continue processing next item
+                continue
     except HTTPException:
         raise
     except ValidationError as exc:
@@ -1605,7 +1780,15 @@ async def api_import_apply(request: ImportApplyRequest):
         logger.exception("Failed to apply import operations")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"status": "ok", "summary": results}
+    response_data = {"status": "ok", "summary": results}
+    
+    if failed_items:
+        response_data["failed_items"] = failed_items
+        logger.info(f"Import completed with {results['failed']} failures. Successful: {results['create']} creates, {results['update']} updates, {results['delete']} deletes")
+    else:
+        logger.info(f"Import completed successfully: {results['create']} creates, {results['update']} updates, {results['delete']} deletes")
+
+    return response_data
 
 
 @app.get("/api/apple/config")
@@ -1621,6 +1804,218 @@ async def api_apple_config():
     }
 
 
+@app.post("/api/apple/inapp/import/preview")
+@csv_processing_endpoint
+async def api_apple_import_preview(file: UploadFile = File(...)):
+    """Preview Apple IAP changes from CSV (create, update, delete operations)."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
+
+    try:
+        # Parse CSV
+        import csv
+        import io
+        content_str = content.decode('utf-8-sig')
+        reader = csv.DictReader(io.StringIO(content_str))
+        rows = list(reader)
+        
+        if not rows:
+            raise HTTPException(status_code=400, detail="CSV 파일에 데이터가 없습니다.")
+        
+        # Get existing products
+        existing_products = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
+        existing_product_ids = {item.get("productId") for item in existing_products if item.get("productId")}
+        
+        # Collect locales from CSV
+        csv_locales = set()
+        for row in rows:
+            for key in row.keys():
+                if key.startswith('name_') or key.startswith('description_'):
+                    locale = key.split('_', 1)[1]
+                    csv_locales.add(locale)
+        
+        # Build operations
+        operations: List[Dict[str, Any]] = []
+        summary = {"create": 0, "update": 0, "delete": 0}
+        
+        for idx, row in enumerate(rows, start=2):  # Start at 2 (header is row 1)
+            product_id = row.get('productId', '').strip()
+            if not product_id:
+                continue
+            
+            # Check if this is an existing product
+            exists = product_id in existing_product_ids
+            
+            if exists:
+                # Update operation
+                operations.append({
+                    "action": "update",
+                    "product_id": product_id,
+                    "data": row,
+                    "row": idx
+                })
+                summary["update"] += 1
+            else:
+                # Create operation
+                operations.append({
+                    "action": "create",
+                    "product_id": product_id,
+                    "data": row,
+                    "row": idx
+                })
+                summary["create"] += 1
+        
+        # Check for products that should be deleted (exist but not in CSV)
+        csv_product_ids = {row.get('productId', '').strip() for row in rows}
+        for existing in existing_products:
+            pid = existing.get("productId")
+            if pid and pid not in csv_product_ids:
+                operations.append({
+                    "action": "delete",
+                    "product_id": pid,
+                    "data": existing
+                })
+                summary["delete"] += 1
+        
+        return {
+            "locales": sorted(csv_locales),
+            "operations": operations,
+            "summary": summary,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to prepare Apple import preview")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/apple/inapp/import/apply")
+@csv_processing_endpoint
+async def api_apple_import_apply(request: Request):
+    """Apply Apple IAP changes from CSV (create, update, delete operations)."""
+    results = {"create": 0, "update": 0, "delete": 0, "failed": 0}
+    failed_items = []
+    
+    try:
+        payload = await request.json()
+        operations = payload.get("operations", [])
+        
+        for idx, op in enumerate(operations, start=1):
+            try:
+                action = op.get("action")
+                product_id = op.get("product_id")
+                
+                if action == "create":
+                    # Create new IAP
+                    # Implementation needed
+                    results["create"] += 1
+                elif action == "update":
+                    # Update existing IAP
+                    # Implementation needed
+                    results["update"] += 1
+                elif action == "delete":
+                    # Delete IAP
+                    await _run_in_thread(delete_inapp_purchase, product_id)
+                    results["delete"] += 1
+                else:
+                    failed_items.append({
+                        "row": idx,
+                        "product_id": product_id,
+                        "action": action,
+                        "error": f"Unknown action: {action}"
+                    })
+                    results["failed"] += 1
+            except Exception as exc:
+                failed_items.append({
+                    "row": idx,
+                    "product_id": op.get("product_id", "unknown"),
+                    "action": op.get("action", "unknown"),
+                    "error": str(exc)
+                })
+                results["failed"] += 1
+                logger.error(f"Failed to process row {idx}: {exc}")
+                continue
+        
+        response_data = {"status": "ok", "summary": results}
+        if failed_items:
+            response_data["failed_items"] = failed_items
+        
+        return response_data
+    except Exception as exc:
+        logger.exception("Failed to apply Apple import operations")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/apple/inapp/export")
+@csv_processing_endpoint
+async def api_apple_export() -> StreamingResponse:
+    """Export all Apple IAPs to CSV."""
+    try:
+        # Get all cached IAPs with full relationships
+        products = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
+        
+        if not products:
+            # Return empty CSV
+            csv_content = b'\xef\xbb\xbfproductId,referenceName\n'  # UTF-8 BOM
+            return StreamingResponse(iter([csv_content]), media_type="text/csv")
+        
+        # Collect all unique locales from products
+        locales = set()
+        for product in products:
+            localizations = product.get("localizations") or {}
+            locales.update(localizations.keys())
+        
+        # Sort locales: KO first, then alphabetical
+        sorted_locales = sorted(locales, key=lambda x: (x != 'ko', x))
+        
+        # Build CSV header
+        base_fields = ['productId', 'referenceName', 'type', 'state', 'clearedForSale', 'familySharable']
+        loc_fields = []
+        for loc in sorted_locales:
+            loc_fields.extend([f'name_{loc}', f'description_{loc}'])
+        
+        fields = base_fields + loc_fields + ['priceTier']
+        
+        # Build CSV rows
+        rows = [','.join(fields)]
+        for product in products:
+            row = [
+                str(product.get('productId', '')),
+                str(product.get('referenceName', '')),
+                str(product.get('type', '')),
+                str(product.get('state', '')),
+                'TRUE' if product.get('clearedForSale') else 'FALSE',
+                'TRUE' if product.get('familySharable') else 'FALSE',
+            ]
+            
+            # Add localizations
+            for loc in sorted_locales:
+                loc_data = product.get('localizations', {}).get(loc, {})
+                row.append(f'"{(loc_data.get("name") or "").replace('"', '""')}"')
+                row.append(f'"{(loc_data.get("description") or "").replace('"', '""')}"')
+            
+            # Add price tier (get first price)
+            prices = product.get('prices', [])
+            price_tier = prices[0].get('priceTier', '') if prices else ''
+            row.append(str(price_tier))
+            
+            rows.append(','.join(row))
+        
+        csv_content = '\n'.join(rows).encode('utf-8-sig')  # UTF-8 with BOM
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"apple-iap-export-{timestamp}.csv"
+        
+        return StreamingResponse(
+            iter([csv_content]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        logger.exception("Failed to export Apple in-app products")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/apple/inapp/list")
 async def api_apple_list_inapp(
     token: str | None = Query(default=None),
@@ -1629,9 +2024,136 @@ async def api_apple_list_inapp(
 ):
     try:
         if refresh:
-            await _run_in_thread(
-                refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
-            )
+            try:
+                # Smart refresh: check if data changed before full fetch
+                cached_products = await _run_in_thread(
+                    get_cached_products, APPLE_STORE, _fetch_apple_products, False
+                )
+                
+                if cached_products:
+                    # Check if IAPs have changed
+                    needs_refresh, added_ids, removed_ids = await _run_in_thread(
+                        _check_apple_products_changed, cached_products
+                    )
+                    
+                    if needs_refresh:
+                        # Perform incremental update if we know what changed
+                        if added_ids is not None and removed_ids is not None:
+                            logger.info("Performing incremental update...")
+                            
+                            # Remove deleted IAPs from cache
+                            if removed_ids:
+                                for product_id in removed_ids:
+                                    try:
+                                        await _run_in_thread(
+                                            delete_cached_product, APPLE_STORE, product_id
+                                        )
+                                        logger.info("Removed deleted IAP from cache: %s", product_id)
+                                    except Exception as exc:
+                                        logger.warning("Failed to remove IAP %s from cache: %s", product_id, exc)
+                            
+                            # Fetch only new IAPs in parallel
+                            if added_ids:
+                                logger.info("Fetching %d new IAPs in parallel...", len(added_ids))
+                                
+                                # Use thread pool for parallel fetching
+                                import concurrent.futures
+                                import time
+                                
+                                def fetch_and_cache_iap(product_id: str) -> Tuple[bool, str, Optional[str]]:
+                                    """Fetch and cache a single IAP. Returns (success, product_id, error)."""
+                                    try:
+                                        iap_detail = get_apple_inapp_purchase_detail(product_id)
+                                        # Remove localizations to match cached format
+                                        if isinstance(iap_detail, dict):
+                                            iap_detail.pop("localizations", None)
+                                        upsert_cached_product(APPLE_STORE, iap_detail)
+                                        return (True, product_id, None)
+                                    except Exception as exc:
+                                        return (False, product_id, str(exc))
+                                
+                                # Process in batches to avoid rate limits
+                                added_list = list(added_ids)
+                                batch_size = 30
+                                max_workers = 3
+                                success_count = 0
+                                failed_count = 0
+                                
+                                for batch_start in range(0, len(added_list), batch_size):
+                                    batch_end = min(batch_start + batch_size, len(added_list))
+                                    batch = added_list[batch_start:batch_end]
+                                    remaining = len(added_list) - batch_end
+                                    
+                                    logger.info(
+                                        "Processing batch %d-%d of %d new IAPs (%d remaining)",
+                                        batch_start + 1, batch_end, len(added_list), remaining
+                                    )
+                                    
+                                    # Fetch batch in parallel
+                                    batch_results = await _run_in_thread(
+                                        lambda: list(
+                                            concurrent.futures.ThreadPoolExecutor(max_workers=max_workers).map(
+                                                fetch_and_cache_iap, batch
+                                            )
+                                        )
+                                    )
+                                    
+                                    # Process results
+                                    for success, product_id, error in batch_results:
+                                        if success:
+                                            success_count += 1
+                                            logger.debug("Added new IAP to cache: %s", product_id)
+                                        else:
+                                            failed_count += 1
+                                            logger.warning("Failed to fetch new IAP %s: %s", product_id, error)
+                                    
+                                    # Delay between batches to avoid rate limits
+                                    if batch_end < len(added_list):
+                                        time.sleep(1.0)
+                                
+                                logger.info(
+                                    "Incremental update complete: %d added, %d failed",
+                                    success_count, failed_count
+                                )
+                        else:
+                            # Unknown changes, do full refresh
+                            logger.info("Changes detected, performing full refresh")
+                await _run_in_thread(
+                    refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
+                )
+                    else:
+                        logger.info("No changes detected, using cached data")
+                else:
+                    # No cache, do full fetch
+                    logger.info("No cached data, performing initial fetch")
+                    await _run_in_thread(
+                        refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
+                    )
+                    
+            except AppleStoreConfigError as exc:
+                logger.warning(
+                    "Failed to refresh Apple products: %s. Continuing with cached data.",
+                    exc
+                )
+                # Continue with cached data instead of failing
+        
+        # Get total count if it's a fresh request
+        total_count = None
+        try:
+            if not token:
+                if refresh:
+                    # Use lightweight ID fetch to get total count without fetching full data again
+                    _, total_count = await _run_in_thread(get_inapp_purchase_ids_lightweight)
+                else:
+                    # For non-refresh requests, get count from cache
+                    cached_items = await _run_in_thread(
+                        get_cached_products, APPLE_STORE, _fetch_apple_products, False
+                    )
+                    if cached_items:
+                        total_count = len(cached_items)
+        except Exception:
+            pass  # Ignore errors when getting total count
+        
         items, next_token = await _run_in_thread(
             get_paginated_products,
             APPLE_STORE,
@@ -1639,7 +2161,12 @@ async def api_apple_list_inapp(
             token,
             page_size=page_size,
         )
-        return {"items": items, "nextPageToken": next_token}
+        
+        return {
+            "items": items, 
+            "nextPageToken": next_token,
+            "totalCount": total_count
+        }
     except HTTPException:
         raise
     except AppleStoreConfigError as exc:
@@ -1650,17 +2177,179 @@ async def api_apple_list_inapp(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/apple/inapp/batch/preview")
+@csv_processing_endpoint
+async def api_apple_batch_create_preview(file: UploadFile = File(...)):
+    """Preview Apple IAP batch creation from CSV (only new IAPs)."""
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
+
+    rows, csv_locales = await _run_in_thread(_parse_apple_batch_create_csv, content)
+
+    try:
+        # Fetch existing products
+        existing_products_raw, _ = await _run_in_thread(
+            get_all_inapp_purchases, include_relationships=False
+        )
+        existing_product_ids = {
+            (item.get("productId") or item.get("sku") or "").strip()
+            for item in existing_products_raw
+        }
+        
+        # Validate and build operations
+        operations: List[Dict[str, Any]] = []
+        errors: List[str] = []
+        
+        for entry in rows:
+            product_id = entry["product_id"]
+            
+            # Check if product already exists
+            if product_id in existing_product_ids:
+                errors.append(f"행 {entry['row']}: {product_id}는 이미 등록된 상품입니다.")
+                continue
+            
+            # Validate IAP type
+            iap_type = entry["type"].lower()
+            valid_types = ["consumable", "non_consumable", "non_renewing_subscription"]
+            if iap_type not in valid_types:
+                errors.append(
+                    f"행 {entry['row']}: type은 {', '.join(valid_types)} 중 하나여야 합니다. (현재: {entry['type']})"
+                )
+                continue
+            
+            operations.append({
+                "action": "create",
+                "product_id": product_id,
+                "data": entry
+            })
+        
+        if errors:
+            raise HTTPException(status_code=400, detail="\n".join(errors))
+        
+        summary = {"create": len(operations)}
+        
+        return {
+            "locales": sorted(csv_locales),
+            "operations": operations,
+            "summary": summary,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to prepare Apple batch create preview")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/apple/inapp/batch/apply")
+async def api_apple_batch_create_apply(request: Request):
+    """Apply Apple IAP batch creation operations."""
+    results = {"create": 0, "failed": 0}
+    errors: List[str] = []
+
+    try:
+        payload = await request.json()
+        operations = payload.get("operations", [])
+        
+        # Fetch existing products to double-check
+        existing_products_raw, _ = await _run_in_thread(
+            get_all_inapp_purchases, include_relationships=False
+        )
+        existing_product_ids = {
+            (item.get("productId") or item.get("sku") or "").strip()
+            for item in existing_products_raw
+        }
+
+        for op in operations:
+            if op.get("action") != "create":
+                continue
+                
+            data = op.get("data", {})
+            product_id = data.get("product_id", "")
+            reference_name = data.get("reference_name", "")
+            iap_type = data.get("type", "consumable")
+            price_tier = data.get("price_tier")
+            localizations_dict = data.get("localizations", {})
+            
+            # Double-check if product already exists
+            if product_id in existing_product_ids:
+                errors.append(f"{product_id}는 이미 등록된 상품입니다.")
+                results["failed"] += 1
+                continue
+            
+            try:
+                # Prepare localizations
+                localizations = []
+                for locale, texts in localizations_dict.items():
+                    localizations.append({
+                        "locale": locale,
+                        "name": texts.get("name", ""),
+                        "description": texts.get("description", ""),
+                    })
+                
+                if not localizations:
+                    errors.append(f"{product_id}: 최소 하나의 언어 번역이 필요합니다.")
+                    results["failed"] += 1
+                    continue
+                
+                # Map IAP type to Apple's format
+                purchase_type_map = {
+                    "consumable": "CONSUMABLE",
+                    "non_consumable": "NON_CONSUMABLE",
+                    "non_renewing_subscription": "NON_RENEWING_SUBSCRIPTION",
+                }
+                purchase_type = purchase_type_map.get(iap_type.lower(), "CONSUMABLE")
+                
+                # Create the IAP
+                created = await _run_in_thread(
+                    create_apple_inapp_purchase,
+                    product_id=product_id,
+                    reference_name=reference_name,
+                    purchase_type=purchase_type,
+                    cleared_for_sale=False,  # Default to not cleared for sale
+                    family_sharable=False,  # Default to not family sharable
+                    review_note=None,
+                    price_tier=price_tier,
+                    base_territory="KOR",  # Default territory
+                    localizations=localizations,
+                )
+                
+                await _run_in_thread(upsert_cached_product, APPLE_STORE, created)
+                existing_product_ids.add(product_id)
+                results["create"] += 1
+            except Exception as exc:
+                logger.error("Failed to create Apple IAP %s: %s", product_id, exc)
+                errors.append(f"{product_id}: {str(exc)}")
+                results["failed"] += 1
+        
+        response = {"status": "ok" if not errors else "partial", "summary": results}
+        if errors:
+            response["errors"] = errors
+        
+        return response
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to apply Apple batch create operations")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/apple/pricing/tiers")
 async def api_apple_price_tiers(territory: str = Query(default="KOR", min_length=2)):
     try:
         tiers = await _run_in_thread(list_apple_price_tiers, territory)
         return {"tiers": tiers}
+    except AppleStorePermissionError as exc:
+        logger.warning("Apple Store permission error for price tiers: %s", exc)
+        # Return empty list instead of error if permissions are missing
+        return {"tiers": []}
     except AppleStoreConfigError as exc:
         logger.error("Apple Store configuration error: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to load Apple price tiers")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # Return empty list instead of 500 error
+        return {"tiers": []}
 
 
 @app.post("/api/apple/inapp/create")

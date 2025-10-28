@@ -5,3 +5,16 @@ __pycache__/
 !.env.example
 *.pyc
 service-account.json
+/AuthKey.p8
+/AuthKey_Admin.p8
+/iap_cache.db
+/iap_cache.db-shm
+/iap_cache.db-wal
+/iap_all.json
+/jq.exe
+/service_account.json
+/.idea/google-iap-tool.iml
+/.idea/misc.xml
+/.idea/modules.xml
+/.idea/inspectionProfiles/profiles_settings.xml
+/.idea/inspectionProfiles/Project_Default.xml

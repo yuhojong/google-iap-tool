@@ -10,6 +10,9 @@ import json
 import logging
 import os
 import re
+import concurrent.futures
+import signal
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -31,9 +34,17 @@ _APPLE_API_BASE = os.getenv(
     "APP_STORE_API_BASE_URL", "https://api.appstoreconnect.apple.com/v1"
 )
 _PRICE_POINTS_CACHE_TTL = int(os.getenv("APP_STORE_PRICE_POINT_CACHE_TTL", "1800"))
+_APPLE_API_TIMEOUT = int(os.getenv("APPLE_API_TIMEOUT", "60"))  # Increased default timeout
 
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE: Optional[Tuple[str, int]] = None
+
+# Fallback token cache for price points API (with App Manager/Finance permissions)
+_FALLBACK_TOKEN_CACHE: Optional[Tuple[str, int]] = None
+_USE_FALLBACK_FOR_PRICE_POINTS = False
+
+# Global flag for graceful shutdown
+_FETCH_INTERRUPTED = threading.Event()
 
 #
 # Some older versions of the App Store Connect API supported JSON:API style
@@ -47,7 +58,8 @@ _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 _INAPP_LIST_SUPPORTS_V2_ENDPOINT = True
 _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
-_PRICE_POINTS_SUPPORTS_PAGE_PARAMS = True
+# appPricePoints endpoint uses simple limit/cursor params, not page[limit]
+_PRICE_POINTS_SUPPORTS_PAGE_PARAMS = False
 
 _INAPP_V2_ID_CACHE: Dict[str, Optional[str]] = {}
 _INAPP_V2_ID_BY_PRODUCT_ID: Dict[str, Optional[str]] = {}
@@ -263,6 +275,15 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _get_fallback_env(name: str) -> Optional[str]:
+    """Get fallback environment variable value (e.g., FALLBACK_APP_STORE_KEY_ID)."""
+    fallback_key = f"FALLBACK_{name}"
+    value = os.getenv(fallback_key)
+    if value:
+        return value.strip()
+    return None
+
+
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -289,14 +310,24 @@ def _require_key_id_env(name: str) -> str:
     return value.upper()
 
 
-def _load_private_key() -> str:
-    path = _require_env("APP_STORE_PRIVATE_KEY_PATH")
+def _load_private_key(use_fallback: bool = False) -> str:
+    key_name = "FALLBACK_APP_STORE_PRIVATE_KEY_PATH" if use_fallback else "APP_STORE_PRIVATE_KEY_PATH"
+    
+    if use_fallback:
+        path = _get_fallback_env("APP_STORE_PRIVATE_KEY_PATH")
+        if not path:
+            raise AppleStoreConfigError(
+                f"Fallback key requested but {key_name} not configured"
+            )
+    else:
+        path = _require_env("APP_STORE_PRIVATE_KEY_PATH")
+    
     try:
         with open(path, "r", encoding="utf-8") as fp:
             contents = fp.read()
     except OSError as exc:  # pragma: no cover - depends on environment
         raise AppleStoreConfigError(
-            f"APP_STORE_PRIVATE_KEY_PATH에서 키를 읽을 수 없습니다: {exc}"
+            f"{key_name}에서 키를 읽을 수 없습니다: {exc}"
         ) from exc
 
     contents = contents.lstrip("\ufeff").strip()
@@ -307,15 +338,44 @@ def _load_private_key() -> str:
     return contents + ("\n" if not contents.endswith("\n") else "")
 
 
-def _generate_token() -> str:
-    global _TOKEN_CACHE
-    issuer_id = _require_uuid_env("APP_STORE_ISSUER_ID")
-    key_id = _require_key_id_env("APP_STORE_KEY_ID")
-    private_key = _load_private_key()
+def _generate_token(use_fallback: bool = False) -> str:
+    """Generate JWT token. If use_fallback=True, uses fallback credentials for price points."""
+    global _TOKEN_CACHE, _FALLBACK_TOKEN_CACHE
+    
+    if use_fallback:
+        # Use fallback credentials (App Manager/Finance role for price points)
+        issuer_id_key = "FALLBACK_APP_STORE_ISSUER_ID"
+        key_id_key = "FALLBACK_APP_STORE_KEY_ID"
+        
+        fallback_issuer = _get_fallback_env("APP_STORE_ISSUER_ID")
+        fallback_key_id = _get_fallback_env("APP_STORE_KEY_ID")
+        
+        if not fallback_issuer or not fallback_key_id:
+            raise AppleStoreConfigError(
+                "Fallback credentials not configured. Set FALLBACK_APP_STORE_ISSUER_ID, "
+                "FALLBACK_APP_STORE_KEY_ID, and FALLBACK_APP_STORE_PRIVATE_KEY_PATH"
+            )
+        
+        # Validate fallback credentials
+        if not _UUID_RE.match(fallback_issuer):
+            raise AppleStoreConfigError(f"{issuer_id_key} 값이 올바른 UUID 형식이 아닙니다.")
+        if not _KEY_ID_RE.match(fallback_key_id.upper()):
+            raise AppleStoreConfigError(f"{key_id_key} 값이 올바른 Key ID 형식이 아닙니다.")
+        
+        issuer_id = fallback_issuer
+        key_id = fallback_key_id.upper()
+        private_key = _load_private_key(use_fallback=True)
+        cache_ref = _FALLBACK_TOKEN_CACHE
+    else:
+        # Use primary credentials
+        issuer_id = _require_uuid_env("APP_STORE_ISSUER_ID")
+        key_id = _require_key_id_env("APP_STORE_KEY_ID")
+        private_key = _load_private_key(use_fallback=False)
+        cache_ref = _TOKEN_CACHE
 
     now = int(time.time())
     with _TOKEN_LOCK:
-        cached = _TOKEN_CACHE
+        cached = cache_ref
         if cached and now < cached[1] - 30:
             return cached[0]
 
@@ -328,7 +388,13 @@ def _generate_token() -> str:
             "aud": "appstoreconnect-v1",
         }
         token = _encode_jwt(payload, private_key, {"kid": key_id, "typ": "JWT"})
-        _TOKEN_CACHE = (token, expires_at)
+        
+        # Update the appropriate cache
+        if use_fallback:
+            _FALLBACK_TOKEN_CACHE = (token, expires_at)
+        else:
+            _TOKEN_CACHE = (token, expires_at)
+        
         return token
 
 
@@ -348,9 +414,10 @@ def generate_jwt(*, force_refresh: bool = False) -> str:
     return _generate_token()
 
 
-def _auth_headers() -> Dict[str, str]:
+def _auth_headers(use_fallback: bool = False) -> Dict[str, str]:
+    """Generate authorization headers. If use_fallback=True, uses fallback credentials."""
     return {
-        "Authorization": f"Bearer {_generate_token()}",
+        "Authorization": f"Bearer {_generate_token(use_fallback=use_fallback)}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
@@ -368,22 +435,65 @@ def _request(
     *,
     params: Optional[Dict[str, Any]] = None,
     json: Optional[Dict[str, Any]] = None,
+    use_fallback: bool = False,
 ) -> Dict[str, Any]:
     if not path.startswith("/"):
         path = "/" + path
     base_url = _APPLE_API_BASE.rstrip("/")
+    
+    # Handle v2 paths: strip /v1 from base_url if needed
     if path.startswith("/v2/") and base_url.endswith("/v1"):
         base_url = base_url[: -len("/v1")] or base_url
+    
+    # Handle v1 paths: if path already has /v1/, and base_url ends with /v1,
+    # strip /v1 from base_url to avoid double /v1/v1
+    if path.startswith("/v1/") and base_url.endswith("/v1"):
+        base_url = base_url[: -len("/v1")] or base_url
+    
     url = base_url + path
     logger.debug("Apple API Request %s %s", method, url)
-    response = requests.request(
-        method,
-        url,
-        headers=_auth_headers(),
-        params=params,
-        json=json,
-        timeout=30,
-    )
+    if logger.isEnabledFor(logging.DEBUG) and params:
+        logger.debug("  Params: %s", params)
+    
+    # Retry logic for timeout errors
+    max_retries = 3
+    retry_delay = 2
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers=_auth_headers(use_fallback=use_fallback),
+                params=params,
+                json=json,
+                timeout=_APPLE_API_TIMEOUT,
+            )
+            break  # Success, exit retry loop
+        except requests.exceptions.Timeout as exc:
+            last_exception = exc
+            if attempt < max_retries - 1:
+                wait_time = retry_delay * (attempt + 1)
+                logger.warning(
+                    "Timeout on %s %s (attempt %d/%d), retrying in %ds...",
+                    method, url, attempt + 1, max_retries, wait_time
+                )
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(
+                    "Timeout on %s %s after %d attempts, giving up",
+                    method, url, max_retries
+                )
+                raise
+        except requests.exceptions.RequestException as exc:
+            # Other request errors (connection errors, etc.) - don't retry
+            logger.error("Request error on %s %s: %s", method, url, exc)
+            raise
+    
+    if last_exception and 'response' not in locals():
+        raise last_exception
     if response.status_code >= 400:
         body_text = response.text.strip()
         errors: List[Dict[str, Any]] = []
@@ -400,15 +510,29 @@ def _request(
                         for entry in raw_errors
                         if isinstance(entry, dict)
                     ]
+        
+        # Determine log level based on error type
+        log_level = logging.ERROR
+        if response.status_code == 403 and errors:
+            # Check if it's a "no allowed operations" error for price points
+            for error in errors:
+                error_detail = (error.get("detail") or "").lower()
+                if "inapppurchasepricepoints" in error_detail and "no allowed operations" in error_detail:
+                    log_level = logging.INFO  # Not an error, just missing permission
+                    break
+        
         summary = _summarize_api_errors(errors) if errors else body_text or ""
-        logger.error(
-            "Apple API error %s: %s",
+        logger.log(
+            log_level,
+            "Apple API error %s: %s | URL: %s",
             response.status_code,
             summary or "No response body",
+            url,
             extra={
                 "status": response.status_code,
                 "body": body_text,
                 "errors": errors,
+                "url": url,
             },
         )
         if response.status_code == 401:
@@ -469,9 +593,14 @@ def _list_inapp_purchase_identifiers_v2(
     *,
     cursor: Optional[str] = None,
     limit: int = 200,
-) -> Tuple[List[Tuple[str, str]], Optional[str]]:
-    endpoint = f"/apps/{_get_app_id()}/inAppPurchasesV2"
-
+    count_only: bool = False,
+) -> Tuple[List[Tuple[str, str]], Optional[str], Optional[int]]:
+    # Try v1-style endpoint first, v2 might not be available for all apps
+    endpoints = [
+        f"/apps/{_get_app_id()}/inAppPurchasesV2",
+        f"/v2/apps/{_get_app_id()}/inAppPurchasesV2",
+    ]
+    
     params: Dict[str, Any] = {}
     if cursor:
         params["cursor"] = cursor
@@ -482,7 +611,33 @@ def _list_inapp_purchase_identifiers_v2(
         if limit:
             params["limit"] = min(limit, 200)
 
-    response = _request("GET", endpoint, params=params or None)
+    response = None
+    for endpoint in endpoints:
+        try:
+            logger.debug("Trying listing endpoint: %s", endpoint)
+            response = _request("GET", endpoint, params=params or None)
+            logger.debug("Successfully fetched from endpoint: %s", endpoint)
+            break
+        except RuntimeError as exc:
+            if _is_path_error(exc) or _is_not_found_error(exc):
+                if endpoint == endpoints[0]:
+                    logger.debug("v1-style endpoint failed, trying v2 endpoint")
+                    continue
+                logger.warning("All listing endpoints failed, will fallback to legacy mode")
+                raise
+    
+    if response is None:
+        raise RuntimeError("Failed to fetch in-app purchase list from any endpoint")
+
+    # Extract total count if available
+    total_count = None
+    meta = response.get("meta", {})
+    if isinstance(meta, dict):
+        pagination = meta.get("paging", {})
+        if isinstance(pagination, dict):
+            total = pagination.get("total")
+            if isinstance(total, int):
+                total_count = total
 
     identifiers: List[Tuple[str, str]] = []
     for entry in response.get("data", []) or []:
@@ -494,11 +649,44 @@ def _list_inapp_purchase_identifiers_v2(
             identifiers.append((inapp_id, resource_type))
 
     next_cursor = _extract_cursor(response.get("links", {}).get("next"))
-    return identifiers, next_cursor
+    
+    # Don't return next_cursor if we have no identifiers to avoid infinite loops
+    # This can happen when:
+    # 1. First request returns 0 items (empty app)
+    # 2. Subsequent pagination returns 0 items (API bug)
+    if not identifiers:
+        logger.debug("No identifiers returned, clearing next_cursor to prevent infinite loop")
+        next_cursor = None
+    
+    return identifiers, next_cursor, total_count
 
 
 def _get_app_id() -> str:
     return _require_env("APP_STORE_APP_ID")
+
+
+def setup_interrupt_handler() -> None:
+    """Setup interrupt handler for graceful shutdown."""
+    def signal_handler(signum, frame):
+        logger.info("Interrupt signal received. Shutting down gracefully...")
+        _FETCH_INTERRUPTED.set()
+        # Give time for current operation to complete, then exit
+        def delayed_exit():
+            time.sleep(2)
+            logger.info("Exiting after graceful shutdown")
+            sys.exit(0)
+        
+        exit_thread = threading.Thread(target=delayed_exit, daemon=True)
+        exit_thread.start()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, signal_handler)
+
+
+def check_interrupted() -> bool:
+    """Check if interrupt signal has been received."""
+    return _FETCH_INTERRUPTED.is_set()
 
 
 def _is_parameter_error(exc: Exception) -> bool:
@@ -592,18 +780,34 @@ def _is_forbidden_error(exc: Exception) -> bool:
     return "FORBIDDEN_ERROR" in message
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    if isinstance(exc, AppleStoreApiError):
+        if exc.status_code == 429:
+            return True
+        for entry in exc.errors:
+            code = (entry.get("code") or entry.get("status") or "").upper()
+            if "RATE_LIMIT" in code or "TOO_MANY" in code:
+                return True
+        return False
+    message = str(exc).upper()
+    if not message:
+        return False
+    return "RATE_LIMIT" in message or "TOO_MANY" in message
+
+
 def list_inapp_purchases(
     cursor: Optional[str] = None,
     limit: int = 200,
     *,
     include_relationships: bool = True,
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    cumulative_fetched: int = 0,
+) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[int]]:
     global _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS, _INAPP_LIST_SUPPORTS_LIMIT_PARAM
     global _INAPP_LIST_SUPPORTS_V2_ENDPOINT
 
     if _INAPP_LIST_SUPPORTS_V2_ENDPOINT:
         try:
-            identifiers, next_cursor = _list_inapp_purchase_identifiers_v2(
+            identifiers, next_cursor, total_count = _list_inapp_purchase_identifiers_v2(
                 cursor=cursor, limit=limit
             )
         except RuntimeError as exc:
@@ -615,43 +819,187 @@ def list_inapp_purchases(
             else:
                 raise
         else:
+            logger.info("Listing %d in-app purchases", len(identifiers))
+            
+            # If we have 0 identifiers, return empty result immediately
+            if len(identifiers) == 0:
+                logger.info("No IAPs to fetch in this batch, returning empty result")
+                return [], next_cursor, total_count
+            
+            # Fetch IAPs in parallel for better performance
+            # Process in batches to avoid rate limiting
+            max_workers = min(3, len(identifiers))  # Further reduce concurrent requests
+            batch_size = 30  # Smaller batches to avoid rate limits
             items: List[Dict[str, Any]] = []
+            failed_items: List[Tuple[Tuple[str, str], int]] = []  # Store failed IAPs for retry
             had_lookup_failure = False
             had_success = False
-            for inapp_id, resource_type in identifiers:
-                try:
-                    record = _get_inapp_purchase_snapshot(
-                        inapp_id, include_relationships=include_relationships
-                    )
-                except Exception as exc:  # pragma: no cover - network dependent
-                    if _is_not_found_error(exc) or _is_forbidden_error(exc):
-                        logger.warning(
-                            "Skipping in-app purchase %s due to API error: %s",
-                            inapp_id,
-                            exc,
+            
+            def fetch_iap_with_retry(identifier: Tuple[str, str], idx: int, max_retries: int = 5) -> Optional[Dict[str, Any]]:
+                inapp_id, resource_type = identifier
+                for attempt in range(max_retries):
+                    try:
+                        record = _get_inapp_purchase_snapshot(
+                            inapp_id, include_relationships=include_relationships
                         )
-                        if _INAPP_LIST_SUPPORTS_V2_ENDPOINT and _should_disable_v2_detail_lookup(exc):
+                        record.setdefault("resourceType", resource_type)
+                        if not include_relationships:
+                            record.pop("localizations", None)
+                            record.pop("prices", None)
+                        logger.debug("Successfully fetched IAP %d/%d: id=%s", idx, len(identifiers), inapp_id)
+                        return record
+                    except RuntimeError as exc:
+                        if _is_rate_limit_error(exc):
+                            if attempt < max_retries - 1:
+                                wait_time = min(2 ** (attempt + 1), 30)  # Cap at 30 seconds
+                                logger.info(
+                                    "Rate limited on IAP %d/%d (id=%s), retry %d/%d in %ds",
+                                    idx, len(identifiers), inapp_id, attempt + 1, max_retries, wait_time
+                                )
+                                time.sleep(wait_time)
+                                continue
+                            logger.warning(
+                                "Rate limited on IAP %d/%d (id=%s) after %d retries - will retry later",
+                                idx, len(identifiers), inapp_id, max_retries
+                            )
+                            return None
+                        
+                        if not (_is_not_found_error(exc) or _is_forbidden_error(exc) or _is_path_error(exc)):
+                            # Fatal error - re-raise
+                            logger.error("Fatal error fetching IAP %d/%d (id=%s): %s", idx, len(identifiers), inapp_id, exc)
+                            raise
+                        # Non-fatal error - log and return None
+                        logger.debug("Skipping IAP %d/%d (id=%s): %s", idx, len(identifiers), inapp_id, exc)
+                        return None
+                    except Exception as exc:
+                        if attempt == max_retries - 1:
+                            logger.error(
+                                "Unexpected error fetching IAP %d/%d (id=%s): %s",
+                                idx,
+                                len(identifiers),
+                                inapp_id,
+                                exc,
+                                exc_info=True
+                            )
+                        return None
+                return None
+            
+            def fetch_iap(identifier: Tuple[str, str], idx: int) -> Optional[Dict[str, Any]]:
+                return fetch_iap_with_retry(identifier, idx)
+            
+            # Process in batches to avoid overwhelming the API
+            for batch_start in range(0, len(identifiers), batch_size):
+                # Check for interrupt
+                if check_interrupted():
+                    logger.info("Fetching interrupted by user")
+                    break
+                
+                batch_end = min(batch_start + batch_size, len(identifiers))
+                batch = list(enumerate(identifiers[batch_start:batch_end], batch_start + 1))
+                
+                # Calculate remaining items across all pages
+                items_fetched_so_far = cumulative_fetched + batch_end
+                if total_count:
+                    remaining = total_count - items_fetched_so_far
+                    logger.info(
+                        "Processing batch: %d-%d of %d (%d/%d fetched, %d remaining)", 
+                        batch_start + 1, batch_end, len(identifiers), items_fetched_so_far, total_count, remaining
+                    )
+                else:
+                    logger.info(
+                        "Processing batch: %d-%d of %d", 
+                        batch_start + 1, batch_end, len(identifiers)
+                    )
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_idx = {
+                        executor.submit(fetch_iap, identifier, idx): idx
+                        for idx, identifier in batch
+                    }
+                    
+                    for future in concurrent.futures.as_completed(future_to_idx):
+                        idx = future_to_idx[future]
+                        try:
+                            result = future.result()
+                            if result:
+                                items.append(result)
+                                had_success = True
+                            else:
+                                had_lookup_failure = True
+                                # Store failed item for retry
+                                failed_items.append((identifiers[idx - 1], idx))
+                        except Exception as exc:
+                            logger.error("Failed to process IAP %d: %s", idx, exc)
                             had_lookup_failure = True
-                        continue
-                    raise
-
-                record.setdefault("resourceType", resource_type)
-                if not include_relationships:
-                    record.pop("localizations", None)
-                    record.pop("prices", None)
-                items.append(record)
-                had_success = True
-            if had_lookup_failure and not had_success:
+                            failed_items.append((identifiers[idx - 1], idx))
+                
+                # Add a longer delay between batches to avoid rate limiting
+                if batch_end < len(identifiers):
+                    time.sleep(1.0)
+            
+            # Retry failed items with longer delays
+            if failed_items and not check_interrupted():
+                logger.info("Retrying %d failed IAPs...", len(failed_items))
+                time.sleep(2)  # Wait before retry
+                
+                retry_success = 0
+                for identifier, idx in failed_items:
+                    if check_interrupted():
+                        logger.info("Retry interrupted by user")
+                        break
+                    try:
+                        result = fetch_iap_with_retry(identifier, idx, max_retries=10)
+                        if result:
+                            items.append(result)
+                            retry_success += 1
+                            logger.debug("Successfully retried IAP %d: id=%s", idx, identifier[0])
+                            time.sleep(0.5)  # Delay between retries
+                        else:
+                            logger.warning("Failed to retry IAP %d: id=%s", idx, identifier[0])
+                    except Exception as exc:
+                        logger.error("Error retrying IAP %d: id=%s, error=%s", idx, identifier[0], exc)
+                
+                if retry_success > 0:
+                    logger.info("Retried %d/%d failed IAPs successfully", retry_success, len(failed_items))
+            
+            # Log summary for this page
+            fetched_count = len(items)
+            total_to_fetch = len(identifiers)
+            if total_count:
+                total_fetched = cumulative_fetched + fetched_count
+                remaining = total_count - total_fetched
                 logger.info(
-                    "Disabling inAppPurchasesV2 detail lookups after repeated errors."
+                    "Page complete: %d/%d IAPs fetched from this page (%d/%d total, %d remaining)", 
+                    fetched_count, total_to_fetch, total_fetched, total_count, remaining
+                )
+            else:
+                logger.info(
+                    "Page complete: %d/%d IAPs fetched from this page", 
+                    fetched_count, total_to_fetch
+                )
+            
+            if had_lookup_failure:
+                logger.warning(
+                    "Completed with %d items missing due to errors", 
+                    total_to_fetch - fetched_count
+                )
+            
+            # Only disable V2 and retry if we had ONLY failures (no successes at all)
+            # But still return partial results if we had some successes
+            if had_lookup_failure and not had_success and _INAPP_LIST_SUPPORTS_V2_ENDPOINT:
+                logger.info(
+                    "Disabling inAppPurchasesV2 detail lookups after all lookups failed."
                 )
                 _INAPP_LIST_SUPPORTS_V2_ENDPOINT = False
-                return list_inapp_purchases(
+                items, next_cursor, _ = list_inapp_purchases(
                     cursor=cursor,
                     limit=limit,
                     include_relationships=include_relationships,
                 )
-            return items, next_cursor
+                return items, next_cursor, total_count
+            
+            # Return partial results if we had some successes
+            return items, next_cursor, total_count
 
     endpoint = f"/apps/{_get_app_id()}/inAppPurchases"
 
@@ -712,7 +1060,7 @@ def list_inapp_purchases(
                 items.append(item)
 
             next_cursor = _extract_cursor(response.get("links", {}).get("next"))
-            return items, next_cursor
+            return items, next_cursor, None  # No total count available in legacy mode
 
     params = {}
     if cursor:
@@ -757,31 +1105,77 @@ def list_inapp_purchases(
         items.append(item)
 
     next_cursor = _extract_cursor(response.get("links", {}).get("next"))
-    return items, next_cursor
+    return items, next_cursor, None  # No total count available in basic mode
 
 
 def iterate_all_inapp_purchases(
     limit: int = 200, *, include_relationships: bool = True
 ) -> Iterable[Dict[str, Any]]:
     cursor: Optional[str] = None
+    cumulative_count = 0
+    page_num = 0
+    
     while True:
-        items, cursor = list_inapp_purchases(
+        page_num += 1
+        items, cursor, total_count = list_inapp_purchases(
             cursor=cursor,
             limit=limit,
             include_relationships=include_relationships,
+            cumulative_fetched=cumulative_count,
         )
+        
+        cumulative_count += len(items)
+        
+        # Yield items
         for item in items:
             yield item
-        if not cursor:
+        
+        # Stop if no more cursor OR if we received 0 items (completed)
+        if not cursor or len(items) == 0:
+            if cumulative_count > 0:
+                logger.info("Fetch complete: %d total items retrieved", cumulative_count)
             break
 
 
 def get_all_inapp_purchases(
     *, include_relationships: bool = True
-) -> List[Dict[str, Any]]:
-    return list(
+) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    items = list(
         iterate_all_inapp_purchases(include_relationships=include_relationships)
     )
+    return items, None  # Total count not available in iterate mode
+
+
+def get_inapp_purchase_ids_lightweight() -> Tuple[List[str], Optional[int]]:
+    """
+    Fetch only IAP IDs without full details for efficient change detection.
+    Returns (list of product IDs, total count)
+    """
+    if _INAPP_LIST_SUPPORTS_V2_ENDPOINT:
+        try:
+            identifiers, next_cursor, total_count = _list_inapp_purchase_identifiers_v2(limit=200)
+            
+            # Fetch all pages of IDs only (no details)
+            all_ids = [iap_id for iap_id, _ in identifiers]
+            
+            while next_cursor:
+                identifiers, next_cursor, _ = _list_inapp_purchase_identifiers_v2(
+                    cursor=next_cursor, limit=200
+                )
+                all_ids.extend([iap_id for iap_id, _ in identifiers])
+            
+            logger.info("Fetched %d IAP IDs (lightweight check)", len(all_ids))
+            return all_ids, total_count
+        except RuntimeError as exc:
+            if _is_parameter_error(exc) or _is_path_error(exc):
+                logger.info("V2 endpoint not available for lightweight check, falling back")
+            else:
+                raise
+    
+    # Fallback: fetch minimal data
+    items, _ = get_all_inapp_purchases(include_relationships=False)
+    ids = [item.get("productId") or item.get("sku") or "" for item in items if item]
+    return [id for id in ids if id], None
 
 
 def _index_included(included: Iterable[Dict[str, Any]], resource_type: str) -> Dict[str, Dict[str, Any]]:
@@ -817,6 +1211,40 @@ def _parse_price_entry(entry: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
         "startDate": attributes.get("startDate"),
         "territory": territory,
         "priceTier": attributes.get("priceTier"),
+    }
+
+
+def _parse_price_point_entry(
+    entry: Dict[str, Any],
+    price_tier_map: Dict[str, Dict[str, Any]],
+    territory_map: Dict[str, Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Parse V2 price point entry with included priceTier and territory."""
+    if not isinstance(entry, dict):
+        return None
+    
+    relationships = entry.get("relationships") or {}
+    
+    # Get price tier from relationship
+    price_tier_data = relationships.get("priceTier", {}).get("data") or {}
+    price_tier_id = price_tier_data.get("id", "")
+    price_tier_info = price_tier_map.get(price_tier_id, {})
+    price_tier_attrs = price_tier_info.get("attributes") or {}
+    
+    # Get territory from relationship
+    territory_data = relationships.get("territory", {}).get("data") or {}
+    territory_id = territory_data.get("id", "")
+    
+    if not territory_id or not price_tier_id:
+        return None
+    
+    return {
+        "id": entry.get("id"),
+        "currency": price_tier_attrs.get("currency"),
+        "price": None,  # Not available in price point response
+        "startDate": None,  # Not available in price point response
+        "territory": territory_id,
+        "priceTier": price_tier_attrs.get("priceTier"),
     }
 
 
@@ -963,19 +1391,24 @@ def _resolve_inapp_v2_identifier(
 
     if product_id:
         params = {"filter[productId]": product_id, "limit": "1"}
-        try:
-            response = _request("GET", "/inAppPurchasesV2", params=params)
-        except RuntimeError as exc:
-            if (
-                _is_path_error(exc)
-                or _is_parameter_error(exc)
-                or _is_forbidden_noop_error(exc)
-                or _is_forbidden_error(exc)
-                or _is_not_found_error(exc)
-            ):
-                _cache_v2_id(inapp_id, product_id, None)
-                return inapp_id, resource_type
-            raise
+        endpoints = ["/v2/inAppPurchasesV2", "/inAppPurchasesV2"]
+        
+        for endpoint in endpoints:
+            try:
+                response = _request("GET", endpoint, params=params)
+                break
+            except RuntimeError as exc:
+                if _is_path_error(exc) and endpoint == endpoints[0]:
+                    # Try next endpoint
+                    continue
+                if (
+                    _is_forbidden_noop_error(exc)
+                    or _is_forbidden_error(exc)
+                    or _is_not_found_error(exc)
+                ):
+                    _cache_v2_id(inapp_id, product_id, None)
+                    return inapp_id, resource_type
+                raise
 
         entries = response.get("data")
         if isinstance(entries, dict):
@@ -1064,13 +1497,9 @@ def _load_localization_entries_v2(
     entries: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
 
-    candidates = [
-        f"/v2/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
-    ]
-    if resource_type == "inAppPurchasesV2":
-        candidates.insert(
-            0, f"/v2/inAppPurchasesV2/{inapp_id}/inAppPurchaseLocalizations"
-        )
+    # For V2 IAPs (numeric IDs), use /v2/inAppPurchases/{id}/inAppPurchaseLocalizations
+    # For V1 IAPs (UUIDs), use /v2/inAppPurchases/{id}/inAppPurchaseLocalizations
+    candidates = [f"/v2/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations"]
 
     for path in candidates:
         entries.clear()
@@ -1116,13 +1545,12 @@ def _load_localizations_via_relationship(
     if resource_type != "inAppPurchasesV2" and inapp_id.isdigit():
         resource_type = "inAppPurchasesV2"
 
-    candidates = [
-        f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations",
-    ]
+    # For V2 IAPs (numeric IDs), use /v2/inAppPurchases/{id}/inAppPurchaseLocalizations
+    # For V1 IAPs (UUIDs), use /inAppPurchases/{id}/inAppPurchaseLocalizations
+    candidates = []
     if resource_type == "inAppPurchasesV2":
-        candidates.insert(
-            0, f"/inAppPurchasesV2/{inapp_id}/inAppPurchaseLocalizations"
-        )
+        candidates.append(f"/v2/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations")
+    candidates.append(f"/inAppPurchases/{inapp_id}/inAppPurchaseLocalizations")
 
     success = False
     for path in candidates:
@@ -1222,13 +1650,18 @@ def _fetch_inapp_prices(
     if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
         return []
 
-    paths = [f"/inAppPurchases/{inapp_id}/prices"]
+    # For V2 IAPs (numeric IDs), use /v2/inAppPurchases/{id}/pricePoints with include=priceTier,territory
+    # For V1 IAPs (UUIDs), use /inAppPurchases/{id}/prices
+    paths = []
     if resource_type == "inAppPurchasesV2":
-        paths.insert(0, f"/inAppPurchasesV2/{inapp_id}/inAppPurchasePrices")
+        paths.append((f"/v2/inAppPurchases/{inapp_id}/pricePoints", True))  # (path, is_v2)
+    paths.append((f"/inAppPurchases/{inapp_id}/prices", False))
 
-    for path in paths:
+    for path, is_v2 in paths:
         try:
-            response = _request("GET", path)
+            # V2 endpoint needs include parameter to get priceTier and territory
+            params = {"include": "priceTier,territory"} if is_v2 else None
+            response = _request("GET", path, params=params)
         except RuntimeError as exc:
             if (
                 _is_path_error(exc)
@@ -1240,10 +1673,22 @@ def _fetch_inapp_prices(
             raise
         else:
             prices: List[Dict[str, Any]] = []
-            for entry in response.get("data", []) or []:
-                parsed = _parse_price_entry(entry)
-                if parsed:
-                    prices.append(parsed)
+            if is_v2:
+                # V2 response includes related priceTier and territory in "included"
+                included = response.get("included", [])
+                price_tier_map = _index_included(included, "inAppPurchasePriceTiers")
+                territory_map = _index_included(included, "territories")
+                
+                for entry in response.get("data", []) or []:
+                    parsed = _parse_price_point_entry(entry, price_tier_map, territory_map)
+                    if parsed:
+                        prices.append(parsed)
+            else:
+                # V1 response has prices directly
+                for entry in response.get("data", []) or []:
+                    parsed = _parse_price_entry(entry)
+                    if parsed:
+                        prices.append(parsed)
             return prices
 
     if _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
@@ -1268,33 +1713,85 @@ def _get_inapp_purchase_snapshot(
         else ("inAppPurchasesV2" if lookup_id.isdigit() else "inAppPurchases")
     )
 
-    path_prefixes = [
-        "inAppPurchasesV2",
-        "inAppPurchases",
-    ]
-    if resource_type != "inAppPurchasesV2":
-        path_prefixes = ["inAppPurchases", "inAppPurchasesV2"]
+    # Build path candidates
+    # Note: resource_type "inAppPurchasesV2" indicates the data model version, not the API endpoint
+    # For V2 IAPs (numeric IDs), we use /v2/inAppPurchases/{id}
+    # For V1 IAPs (UUIDs), we use /v1/inAppPurchases/{id} or just /inAppPurchases/{id}
+    
+    path_candidates = []
+    if resource_type == "inAppPurchasesV2" or lookup_id.isdigit():
+        # This is a V2 IAP (numeric ID) - try V2 API endpoint
+        path_candidates = [
+            f"/v2/inAppPurchases/{lookup_id}",
+            f"/v1/inAppPurchases/{lookup_id}",
+            f"/inAppPurchases/{lookup_id}",
+        ]
+    else:
+        # This is a V1 IAP (UUID) - try V1 API endpoints
+        path_candidates = [
+            f"/v1/inAppPurchases/{lookup_id}",
+            f"/inAppPurchases/{lookup_id}",
+            f"/v2/inAppPurchases/{lookup_id}",  # Some V1 resources might be accessible via V2
+        ]
 
     last_error: Optional[RuntimeError] = None
-    for prefix in path_prefixes:
-        path = f"/{prefix}/{lookup_id}"
+    logger.debug("Fetching IAP snapshot for ID=%s, resource_type=%s, trying %d paths", 
+                 lookup_id, resource_type, len(path_candidates))
+    for idx, path in enumerate(path_candidates, 1):
+        logger.debug("Trying path %d/%d: %s for IAP ID=%s", idx, len(path_candidates), path, lookup_id)
         try:
-            params = (
-                {
-                    "include": "inAppPurchaseLocalizations,inAppPurchasePrices"
-                }
-                if include_relationships
-                else None
-            )
+            # V2 API uses different include parameter
+            if path.startswith("/v2/"):
+                params = (
+                    {
+                        "include": "inAppPurchaseLocalizations"
+                    }
+                    if include_relationships
+                    else None
+                )
+            else:
+                params = (
+                    {
+                        "include": "inAppPurchaseLocalizations,inAppPurchasePrices"
+                    }
+                    if include_relationships
+                    else None
+                )
             response = _request("GET", path, params=params)
         except RuntimeError as exc:
             if include_relationships and _is_parameter_error(exc):
                 logger.info(
                     "Apple API rejected include when fetching in-app purchase %s via %s; "
-                    "falling back to compatibility mode.",
+                    "falling back to fetch without include.",
                     lookup_id,
                     path,
                 )
+                # Try the same path without include parameter
+                try:
+                    base = _request("GET", path)
+                    record = _canonicalize_record(base.get("data", {}), {}, {})
+                    resource_type = record.get("resourceType", "inAppPurchases")
+                    record["localizations"] = _fetch_inapp_localizations(
+                        lookup_id, resource_type
+                    )
+                    record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+                    return record
+                except RuntimeError as inner_exc:
+                    if (
+                        _is_path_error(inner_exc)
+                        or _is_forbidden_noop_error(inner_exc)
+                        or _is_forbidden_error(inner_exc)
+                        or _is_not_found_error(inner_exc)
+                    ):
+                        last_error = inner_exc
+                        logger.debug(
+                            "Apple API rejected path %s for in-app purchase %s (inner error: %s); trying alternate path.",
+                            path,
+                            lookup_id,
+                            inner_exc
+                        )
+                        continue
+                    raise
             elif (
                 _is_path_error(exc)
                 or _is_forbidden_noop_error(exc)
@@ -1302,56 +1799,59 @@ def _get_inapp_purchase_snapshot(
                 or _is_not_found_error(exc)
             ):
                 last_error = exc
+                logger.debug(
+                    "Apple API rejected path %s for in-app purchase %s (error: %s); trying alternate path.",
+                    path,
+                    lookup_id,
+                    exc,
+                )
                 continue
             else:
                 raise
-        else:
-            data = response.get("data", {})
-            included = (
-                response.get("included", []) if include_relationships else []
-            )
-            localization_map = (
-                _index_included(included, "inAppPurchaseLocalizations")
-                if include_relationships
-                else {}
-            )
-            prices_map = (
-                _index_included(included, "inAppPurchasePrices")
-                if include_relationships
-                else {}
-            )
-            result = _canonicalize_record(data, localization_map, prices_map)
-            if result:
-                if not include_relationships:
-                    result.pop("localizations", None)
-                    result.pop("prices", None)
-                return result
-
-        try:
-            base = _request("GET", path)
-        except RuntimeError as exc:
-            if (
-                _is_path_error(exc)
-                or _is_forbidden_noop_error(exc)
-                or _is_forbidden_error(exc)
-                or _is_not_found_error(exc)
-            ):
-                last_error = exc
-                continue
-            else:
-                raise
-
-        record = _canonicalize_record(base.get("data", {}), {}, {})
-        resource_type = record.get("resourceType", "inAppPurchases")
+        
+        # Successfully fetched with include parameter
+        data = response.get("data", {})
+        included = (
+            response.get("included", []) if include_relationships else []
+        )
+        localization_map = (
+            _index_included(included, "inAppPurchaseLocalizations")
+            if include_relationships
+            else {}
+        )
+        prices_map = (
+            _index_included(included, "inAppPurchasePrices")
+            if include_relationships
+            else {}
+        )
+        result = _canonicalize_record(data, localization_map, prices_map)
+        if result:
+            if not include_relationships:
+                result.pop("localizations", None)
+                result.pop("prices", None)
+            return result
+        
+        # If canonicalization returned empty, try fetching without include
         if include_relationships:
-            record["localizations"] = _fetch_inapp_localizations(
-                lookup_id, resource_type
-            )
-            record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
-        else:
-            record.pop("localizations", None)
-            record.pop("prices", None)
-        return record
+            try:
+                base = _request("GET", path)
+                record = _canonicalize_record(base.get("data", {}), {}, {})
+                resource_type = record.get("resourceType", "inAppPurchases")
+                record["localizations"] = _fetch_inapp_localizations(
+                    lookup_id, resource_type
+                )
+                record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+                return record
+            except RuntimeError as inner_exc:
+                if (
+                    _is_path_error(inner_exc)
+                    or _is_forbidden_noop_error(inner_exc)
+                    or _is_forbidden_error(inner_exc)
+                    or _is_not_found_error(inner_exc)
+                ):
+                    last_error = inner_exc
+                    continue
+                raise
 
     if last_error:
         raise last_error
@@ -1627,12 +2127,26 @@ def _build_price_point_params(
 def _request_price_points(
     filters: Dict[str, Any], *, limit: int, cursor: Optional[str] = None
 ) -> Dict[str, Any]:
-    global _PRICE_POINTS_SUPPORTS_PAGE_PARAMS
+    global _PRICE_POINTS_SUPPORTS_PAGE_PARAMS, _USE_FALLBACK_FOR_PRICE_POINTS
 
+    # Use app-level appPricePoints endpoint instead of inAppPurchasePricePoints
+    # This endpoint is more accessible and only returns customer prices (not proceeds)
+    app_id = _get_app_id()
+    endpoint = f"/apps/{app_id}/appPricePoints"
+    
     while True:
         params = _build_price_point_params(filters, limit=limit, cursor=cursor)
         try:
-            return _request("GET", "/inAppPurchasePricePoints", params=params)
+            # Try fallback credentials if previously detected 403 for price points
+            if _USE_FALLBACK_FOR_PRICE_POINTS:
+                try:
+                    return _request("GET", endpoint, params=params, use_fallback=True)
+                except AppleStoreConfigError:
+                    # Fallback credentials not configured, fall through to primary
+                    logger.warning("Fallback credentials not configured, using primary credentials")
+                    pass
+            
+            return _request("GET", endpoint, params=params)
         except AppleStoreApiError as exc:
             if _is_parameter_error(exc) and _PRICE_POINTS_SUPPORTS_PAGE_PARAMS:
                 logger.info(
@@ -1641,6 +2155,27 @@ def _request_price_points(
                 )
                 _PRICE_POINTS_SUPPORTS_PAGE_PARAMS = False
                 continue
+            
+            # Check if it's a 403 forbidden error for price points
+            if _is_forbidden_noop_error(exc) and not _USE_FALLBACK_FOR_PRICE_POINTS:
+                # Check if fallback credentials are available
+                fallback_issuer = _get_fallback_env("APP_STORE_ISSUER_ID")
+                fallback_key_id = _get_fallback_env("APP_STORE_KEY_ID")
+                fallback_key_path = _get_fallback_env("APP_STORE_PRIVATE_KEY_PATH")
+                
+                if fallback_issuer and fallback_key_id and fallback_key_path:
+                    logger.info(
+                        "Price points access forbidden with primary credentials. "
+                        "Switching to fallback credentials (App Manager/Finance role)."
+                    )
+                    _USE_FALLBACK_FOR_PRICE_POINTS = True
+                    # Retry with fallback
+                    try:
+                        return _request("GET", endpoint, params=params, use_fallback=True)
+                    except Exception as fallback_exc:
+                        logger.error("Fallback credentials also failed: %s", fallback_exc)
+                        raise exc  # Raise original exception
+            
             raise
 
 
@@ -1851,11 +2386,11 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
             tier_id = attributes.get("priceTier")
             if not tier_id or tier_id in tiers:
                 continue
+            # Note: appPricePoints endpoint only returns customerPrice (not proceeds)
             tiers[tier_id] = {
                 "tier": tier_id,
                 "currency": attributes.get("currency"),
                 "customerPrice": attributes.get("customerPrice"),
-                "proceeds": attributes.get("proceeds"),
             }
 
     tiers: Dict[str, Dict[str, Any]] = {}
@@ -1863,8 +2398,18 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
 
     permission_message = (
         "Apple API 키에 인앱 가격 정보를 조회할 권한이 없습니다. "
-        "App Store Connect에서 API 키에 App Manager 또는 Finance 역할이 포함되어 있는지 확인해 주세요."
+        "일부 API 키는 Admin 역할을 가지고 있더라도 inAppPurchasePricePoints 리소스에 대한 특정 권한이 없을 수 있습니다. "
+        "이것은 정상적인 동작이며 애플리케이션은 가격 티어 데이터 없이도 정상 작동합니다."
     )
+    
+    # If we've previously detected that we don't have permission, return empty list
+    # This avoids repeated API calls that will just fail
+    if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
+        logger.warning(
+            "Price tier access is disabled due to missing permissions. "
+            "Returning empty price tier list."
+        )
+        return []
 
     try:
         while True:
@@ -1877,14 +2422,21 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
     except AppleStoreApiError as exc:
         if not _is_forbidden_error(exc):
             raise
+        
+        # If we get a forbidden error with "no allowed operations", it means
+        # the API key doesn't have access to price points at all
         if _is_forbidden_noop_error(exc):
-            logger.warning(
-                "Apple API rejected unrestricted price point listing; falling back to "
-                "tier enumeration."
+            logger.info(
+                "Price tier information is not available with current API key permissions. "
+                "Even with Admin role, some API keys may not have the specific permission to read inAppPurchasePricePoints. "
+                "This is expected behavior and the application will work without price tier data."
             )
-        else:
-            message = _compose_permission_error_message(exc, permission_message)
-            raise AppleStorePermissionError(message) from exc
+            return []
+        
+        message = _compose_permission_error_message(exc, permission_message)
+        logger.warning(
+            "Apple API permission error for price points; attempting tier enumeration as fallback."
+        )
 
         tiers.clear()
         chunk_size = 25
@@ -1903,6 +2455,12 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                         chunk,
                     )
                     continue
+                if _is_forbidden_noop_error(inner_exc):
+                    # No permissions for price points at all
+                    logger.warning(
+                        "No permission to access price points; returning empty tier list."
+                    )
+                    return []
                 if _is_forbidden_error(inner_exc):
                     logger.debug(
                         "Apple API forbade chunked price tier request; retrying tier-by-tier",
@@ -1925,6 +2483,12 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
                                     tier,
                                 )
                                 continue
+                            if _is_forbidden_noop_error(single_exc):
+                                # If no permissions for price points, return empty list
+                                logger.warning(
+                                    "No permission to access price points; returning empty tier list."
+                                )
+                                return []
                             if _is_forbidden_error(single_exc):
                                 message = _compose_permission_error_message(
                                     single_exc, permission_message
