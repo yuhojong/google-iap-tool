@@ -13,8 +13,4 @@ service-account.json
 /iap_all.json
 /jq.exe
 /service_account.json
-/.idea/google-iap-tool.iml
-/.idea/misc.xml
-/.idea/modules.xml
-/.idea/inspectionProfiles/profiles_settings.xml
-/.idea/inspectionProfiles/Project_Default.xml
+/.idea
