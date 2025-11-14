@@ -11,20 +11,24 @@ import logging
 import os
 import re
 import concurrent.futures
-import signal
+import uuid
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import requests
 
+# Ensure the exception placeholder exists at module scope (Py3.11+ clears except vars)
+_jwt_import_error = None  # type: ignore[assignment]
 try:  # pragma: no cover - import-time environment check
     import jwt as _jwt_module
-except ImportError as _jwt_import_error:  # pragma: no cover - handled lazily
+except ImportError as _exc:  # pragma: no cover - handled lazily
     _jwt_module = None  # type: ignore[assignment]
+    _jwt_import_error = _exc  # capture for later error chaining
 else:  # pragma: no cover - exercised when dependency is available
     _jwt_import_error = None  # type: ignore[assignment]
 
@@ -43,9 +47,6 @@ _TOKEN_CACHE: Optional[Tuple[str, int]] = None
 _FALLBACK_TOKEN_CACHE: Optional[Tuple[str, int]] = None
 _USE_FALLBACK_FOR_PRICE_POINTS = False
 
-# Global flag for graceful shutdown
-_FETCH_INTERRUPTED = threading.Event()
-
 #
 # Some older versions of the App Store Connect API supported JSON:API style
 # query parameters such as ``include`` and ``page[limit]`` when listing in-app
@@ -58,6 +59,7 @@ _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS = True
 _INAPP_LIST_SUPPORTS_LIMIT_PARAM = True
 _INAPP_LIST_SUPPORTS_V2_ENDPOINT = True
 _INAPP_PRICE_RELATIONSHIP_AVAILABLE = True
+_PRICE_TIER_ACCESS_AVAILABLE = True
 # appPricePoints endpoint uses simple limit/cursor params, not page[limit]
 _PRICE_POINTS_SUPPORTS_PAGE_PARAMS = False
 
@@ -68,6 +70,84 @@ _LOCALIZATION_LIST_STRATEGY: Optional[str] = None
 
 
 _PRICE_TIER_GUESS_RANGE = tuple(str(value) for value in range(0, 201))
+
+_PRICE_POINT_REFERENCE_IAP_ID: Optional[str] = None
+_PRICE_POINT_REFERENCE_LOCK = threading.Lock()
+_PRICE_TIER_CACHE_TTL = int(os.getenv("APPLE_PRICE_TIER_CACHE_TTL", "3600"))
+_PRICE_TIER_CACHE: Dict[str, "_PriceTierCacheEntry"] = {}
+_PRICE_TIER_CACHE_LOCK = threading.Lock()
+
+
+_ALL_TERRITORIES_CACHE: Optional[List[str]] = None
+_ALL_TERRITORIES_LOCK = threading.Lock()
+
+
+def _load_all_territories() -> List[str]:
+    global _ALL_TERRITORIES_CACHE
+
+    with _ALL_TERRITORIES_LOCK:
+        if _ALL_TERRITORIES_CACHE is not None:
+            return list(_ALL_TERRITORIES_CACHE)
+
+    try:
+        territories: List[str] = []
+        cursor: Optional[str] = None
+
+        while True:
+            params: Dict[str, Any] = {"limit": 200}
+            if cursor:
+                params["page[cursor]"] = cursor
+
+            response = _request("GET", "/v1/territories", params=params)
+            for entry in response.get("data", []) or []:
+                territory_id = (entry.get("id") or "").strip().upper()
+                if territory_id and territory_id not in territories:
+                    territories.append(territory_id)
+
+            cursor = _extract_cursor(response.get("links", {}).get("next"))
+            if not cursor:
+                break
+
+        if not territories:
+            raise RuntimeError("Apple API에서 테리토리 목록을 반환하지 않았습니다.")
+
+        with _ALL_TERRITORIES_LOCK:
+            _ALL_TERRITORIES_CACHE = list(territories)
+
+        return territories
+    except Exception as exc:
+        logger.warning(
+            "전체 테리토리 목록을 불러오지 못했습니다. 고정 테리토리 목록으로 대체합니다: %s",
+            exc,
+        )
+        with _ALL_TERRITORIES_LOCK:
+            _ALL_TERRITORIES_CACHE = list(_FIXED_PRICE_TERRITORIES)
+        return list(_FIXED_PRICE_TERRITORIES)
+
+
+def _collect_manual_price_territories(base_territory: str) -> List[str]:
+    territories: List[str] = []
+    normalized_base = (base_territory or "").strip().upper()
+    if normalized_base:
+        territories.append(normalized_base)
+    for fixed_territory in _FIXED_PRICE_TERRITORIES:
+        normalized = fixed_territory.strip().upper()
+        if normalized and normalized not in territories:
+            territories.append(normalized)
+    return territories
+
+
+def _collect_availability_territories(base_territory: str) -> List[str]:
+    territories: List[str] = []
+    normalized_base = (base_territory or "").strip().upper()
+    if normalized_base:
+        territories.append(normalized_base)
+
+    for territory in _load_all_territories():
+        normalized = territory.strip().upper()
+        if normalized and normalized not in territories:
+            territories.append(normalized)
+    return territories
 
 
 def _parse_territory_list(value: Optional[str]) -> List[str]:
@@ -199,7 +279,7 @@ def _encode_jwt(payload: Dict[str, Any], private_key: str, headers: Dict[str, st
             token = token.decode("utf-8")
         return token
 
-    logger.warning(
+    logger.debug(
         "PyJWT encode API를 사용할 수 없어 cryptography 기반 JWT 생성을 시도합니다."
     )
     return _encode_jwt_with_cryptography(payload, private_key, headers)
@@ -666,27 +746,13 @@ def _get_app_id() -> str:
 
 
 def setup_interrupt_handler() -> None:
-    """Setup interrupt handler for graceful shutdown."""
-    def signal_handler(signum, frame):
-        logger.info("Interrupt signal received. Shutting down gracefully...")
-        _FETCH_INTERRUPTED.set()
-        # Give time for current operation to complete, then exit
-        def delayed_exit():
-            time.sleep(2)
-            logger.info("Exiting after graceful shutdown")
-            sys.exit(0)
-        
-        exit_thread = threading.Thread(target=delayed_exit, daemon=True)
-        exit_thread.start()
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    if hasattr(signal, 'SIGTERM'):
-        signal.signal(signal.SIGTERM, signal_handler)
+    """Placeholder: interrupt handler is no longer used."""
+    pass
 
 
 def check_interrupted() -> bool:
-    """Check if interrupt signal has been received."""
-    return _FETCH_INTERRUPTED.is_set()
+    """Placeholder: interrupt check is no longer used."""
+    return False
 
 
 def _is_parameter_error(exc: Exception) -> bool:
@@ -801,6 +867,7 @@ def list_inapp_purchases(
     *,
     include_relationships: bool = True,
     cumulative_fetched: int = 0,
+    summary_only: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[int]]:
     global _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS, _INAPP_LIST_SUPPORTS_LIMIT_PARAM
     global _INAPP_LIST_SUPPORTS_V2_ENDPOINT
@@ -835,12 +902,18 @@ def list_inapp_purchases(
             had_lookup_failure = False
             had_success = False
             
-            def fetch_iap_with_retry(identifier: Tuple[str, str], idx: int, max_retries: int = 5) -> Optional[Dict[str, Any]]:
+            def fetch_iap_with_retry(
+                identifier: Tuple[str, str],
+                idx: int,
+                max_retries: int = 5,
+            ) -> Optional[Dict[str, Any]]:
                 inapp_id, resource_type = identifier
                 for attempt in range(max_retries):
                     try:
                         record = _get_inapp_purchase_snapshot(
-                            inapp_id, include_relationships=include_relationships
+                            inapp_id,
+                            include_relationships=include_relationships,
+                            summary_only=summary_only,
                         )
                         record.setdefault("resourceType", resource_type)
                         if not include_relationships:
@@ -995,6 +1068,7 @@ def list_inapp_purchases(
                     cursor=cursor,
                     limit=limit,
                     include_relationships=include_relationships,
+                    summary_only=summary_only,
                 )
                 return items, next_cursor, total_count
             
@@ -1005,18 +1079,18 @@ def list_inapp_purchases(
 
     if _INAPP_LIST_SUPPORTS_EXTENDED_PARAMS:
         params: Dict[str, Any] = {
-            "include": "inAppPurchaseLocalizations,inAppPurchasePrices",
             "fields[inAppPurchases]": ",".join(
                 [
                     "productId",
                     "referenceName",
                     "inAppPurchaseType",
                     "state",
-                    "clearedForSale",
-                    "familySharable",
                 ]
             ),
         }
+        if include_relationships:
+            params["include"] = "inAppPurchaseLocalizations"
+            params["fields[inAppPurchaseLocalizations]"] = "locale,name"
         if limit:
             params["page[limit]"] = limit
         if cursor:
@@ -1055,9 +1129,14 @@ def list_inapp_purchases(
                 if resolved_id:
                     item["id"] = resolved_id
                 item["resourceType"] = resolved_type
-                if not include_relationships:
-                    item.pop("localizations", None)
-                items.append(item)
+                finalized = _finalize_inapp_record(
+                    item,
+                    summary_only=summary_only,
+                )
+                if not summary_only and not include_relationships:
+                    finalized.pop("localizations", None)
+                    finalized.pop("prices", None)
+                items.append(finalized)
 
             next_cursor = _extract_cursor(response.get("links", {}).get("next"))
             return items, next_cursor, None  # No total count available in legacy mode
@@ -1101,15 +1180,26 @@ def list_inapp_purchases(
             )
         else:
             item.pop("localizations", None)
-        item["prices"] = _fetch_inapp_prices(inapp_id, resource_type)
-        items.append(item)
+        if summary_only:
+            item.pop("prices", None)
+        else:
+            item["prices"] = _fetch_inapp_prices(inapp_id, resource_type)
+        finalized = _finalize_inapp_record(
+            item,
+            summary_only=summary_only,
+        )
+        items.append(finalized)
 
     next_cursor = _extract_cursor(response.get("links", {}).get("next"))
     return items, next_cursor, None  # No total count available in basic mode
 
 
 def iterate_all_inapp_purchases(
-    limit: int = 200, *, include_relationships: bool = True
+    limit: int = 200,
+    *,
+    include_relationships: bool = True,
+    max_items: Optional[int] = None,
+    summary_only: bool = False,
 ) -> Iterable[Dict[str, Any]]:
     cursor: Optional[str] = None
     cumulative_count = 0
@@ -1122,7 +1212,16 @@ def iterate_all_inapp_purchases(
             limit=limit,
             include_relationships=include_relationships,
             cumulative_fetched=cumulative_count,
+            summary_only=summary_only,
         )
+        
+        # Apply max_items limit if specified (for debug mode)
+        if max_items is not None and cumulative_count + len(items) > max_items:
+            remaining = max_items - cumulative_count
+            if remaining > 0:
+                items = items[:remaining]
+            else:
+                items = []
         
         cumulative_count += len(items)
         
@@ -1130,18 +1229,25 @@ def iterate_all_inapp_purchases(
         for item in items:
             yield item
         
-        # Stop if no more cursor OR if we received 0 items (completed)
-        if not cursor or len(items) == 0:
+        # Stop if no more cursor OR if we received 0 items (completed) OR if we hit max_items limit
+        if not cursor or len(items) == 0 or (max_items is not None and cumulative_count >= max_items):
             if cumulative_count > 0:
                 logger.info("Fetch complete: %d total items retrieved", cumulative_count)
             break
 
 
 def get_all_inapp_purchases(
-    *, include_relationships: bool = True
+    *,
+    include_relationships: bool = True,
+    max_items: Optional[int] = None,
+    summary_only: bool = False,
 ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
     items = list(
-        iterate_all_inapp_purchases(include_relationships=include_relationships)
+        iterate_all_inapp_purchases(
+            include_relationships=include_relationships,
+            max_items=max_items,
+            summary_only=summary_only,
+        )
     )
     return items, None  # Total count not available in iterate mode
 
@@ -1155,14 +1261,14 @@ def get_inapp_purchase_ids_lightweight() -> Tuple[List[str], Optional[int]]:
         try:
             identifiers, next_cursor, total_count = _list_inapp_purchase_identifiers_v2(limit=200)
             
-            # Fetch all pages of IDs only (no details)
-            all_ids = [iap_id for iap_id, _ in identifiers]
+            # Fetch all pages of product IDs only (no details)
+            all_ids = [product_id for product_id, _ in identifiers if product_id]
             
             while next_cursor:
                 identifiers, next_cursor, _ = _list_inapp_purchase_identifiers_v2(
                     cursor=next_cursor, limit=200
                 )
-                all_ids.extend([iap_id for iap_id, _ in identifiers])
+                all_ids.extend([product_id for product_id, _ in identifiers if product_id])
             
             logger.info("Fetched %d IAP IDs (lightweight check)", len(all_ids))
             return all_ids, total_count
@@ -1325,6 +1431,70 @@ def _canonicalize_record(
         "localizations": localizations,
         "prices": prices,
     }
+
+
+def _summarize_inapp_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+
+    localizations = record.get("localizations") or {}
+    preferred_name = ""
+    for key in ("ko", "ko-KR", "ko_kr", "KOR"):
+        loc_payload = localizations.get(key)
+        if isinstance(loc_payload, dict):
+            name = loc_payload.get("name")
+            if name:
+                preferred_name = str(name)
+                break
+
+    if not preferred_name:
+        preferred_name = str(record.get("referenceName") or "")
+
+    product_id = str(record.get("productId") or record.get("sku") or "")
+    summary: Dict[str, Any] = {
+        "id": record.get("id"),
+        "resourceType": record.get("resourceType"),
+        "productId": product_id,
+        "sku": product_id,
+        "referenceName": preferred_name,
+        "type": record.get("type"),
+        "state": record.get("state"),
+    }
+
+    krw_price = record.get("krwPrice")
+    if isinstance(krw_price, dict) and krw_price:
+        summary["krwPrice"] = krw_price
+        price_tier = krw_price.get("priceTier")
+        if price_tier:
+            summary["priceTier"] = price_tier
+    else:
+        price_tier = record.get("priceTier")
+        if price_tier:
+            summary["priceTier"] = price_tier
+
+    return summary
+
+
+def _finalize_inapp_record(
+    record: Dict[str, Any],
+    *,
+    summary_only: bool = False,
+) -> Dict[str, Any]:
+    if not isinstance(record, dict):
+        return {}
+
+    identifier = str(record.get("id") or "")
+    price_info = _fetch_krw_price_with_retry(identifier) if identifier else None
+    if price_info:
+        record["krwPrice"] = price_info
+        tier_value = price_info.get("priceTier")
+        if tier_value:
+            record["priceTier"] = tier_value
+
+    if summary_only:
+        return _summarize_inapp_record(record)
+
+    return record
 
 
 def _normalize_localization_entries(entries: object) -> List[Dict[str, Any]]:
@@ -1650,58 +1820,305 @@ def _fetch_inapp_prices(
     if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
         return []
 
-    # For V2 IAPs (numeric IDs), use /v2/inAppPurchases/{id}/pricePoints with include=priceTier,territory
-    # For V1 IAPs (UUIDs), use /inAppPurchases/{id}/prices
+    # Note: V2 pricePoints API has changed and no longer supports include parameters
+    # We now rely on inAppPurchasePriceSchedules for price information
+    # This function is kept for backward compatibility but may return empty list
     paths = []
-    if resource_type == "inAppPurchasesV2":
-        paths.append((f"/v2/inAppPurchases/{inapp_id}/pricePoints", True))  # (path, is_v2)
-    paths.append((f"/inAppPurchases/{inapp_id}/prices", False))
+    # Only try V1 endpoint for UUID-based IAPs
+    if resource_type != "inAppPurchasesV2" and not inapp_id.isdigit():
+        paths.append((f"/inAppPurchases/{inapp_id}/prices", False))
 
     for path, is_v2 in paths:
         try:
-            # V2 endpoint needs include parameter to get priceTier and territory
-            params = {"include": "priceTier,territory"} if is_v2 else None
-            response = _request("GET", path, params=params)
+            response = _request("GET", path)
         except RuntimeError as exc:
             if (
                 _is_path_error(exc)
+                or _is_parameter_error(exc)
                 or _is_forbidden_noop_error(exc)
                 or _is_forbidden_error(exc)
                 or _is_not_found_error(exc)
             ):
                 continue
-            raise
+            # Don't raise, just log and continue
+            logger.debug("Failed to fetch prices for IAP %s via %s: %s", inapp_id, path, exc)
+            continue
         else:
             prices: List[Dict[str, Any]] = []
-            if is_v2:
-                # V2 response includes related priceTier and territory in "included"
-                included = response.get("included", [])
-                price_tier_map = _index_included(included, "inAppPurchasePriceTiers")
-                territory_map = _index_included(included, "territories")
-                
-                for entry in response.get("data", []) or []:
-                    parsed = _parse_price_point_entry(entry, price_tier_map, territory_map)
-                    if parsed:
-                        prices.append(parsed)
-            else:
-                # V1 response has prices directly
-                for entry in response.get("data", []) or []:
-                    parsed = _parse_price_entry(entry)
-                    if parsed:
-                        prices.append(parsed)
+            # V1 response has prices directly
+            for entry in response.get("data", []) or []:
+                parsed = _parse_price_entry(entry)
+                if parsed:
+                    prices.append(parsed)
             return prices
 
+    # Price relationship API is not reliable, disable it
     if _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
-        logger.warning(
-            "Apple API rejected in-app purchase price relationship lookup; "
-            "price data will not be included in responses."
+        logger.debug(
+            "Apple API price relationship not available for IAP %s; "
+            "using price schedule API instead.",
+            inapp_id,
         )
     _INAPP_PRICE_RELATIONSHIP_AVAILABLE = False
     return []
 
 
+def _fetch_price_schedule_id(inapp_id: str) -> Optional[str]:
+    if not inapp_id:
+        return None
+
+    path = (
+        f"/v2/inAppPurchases/{inapp_id}/iapPriceSchedule"
+        if inapp_id.isdigit()
+        else f"/inAppPurchases/{inapp_id}/priceSchedule"
+    )
+
+    try:
+        response = _request("GET", path)
+    except RuntimeError as exc:
+        if _is_not_found_error(exc) or _is_forbidden_error(exc):
+            logger.debug("Price schedule lookup failed for IAP %s: %s", inapp_id, exc)
+            return None
+        raise
+
+    data = response.get("data", {}) if isinstance(response, dict) else {}
+    schedule_id = data.get("id")
+    if not schedule_id:
+        logger.debug("No price schedule ID found for IAP %s", inapp_id)
+        return None
+    return schedule_id
+
+
+def _list_manual_prices(schedule_id: str, territory: Optional[str] = None) -> List[Dict[str, Any]]:
+    if not schedule_id:
+        return []
+    params: Dict[str, Any] = {
+        "include": "inAppPurchasePricePoint,territory",
+    }
+    if territory:
+        params["filter[territory]"] = territory
+
+    try:
+        response = _request(
+            "GET",
+            f"/v1/inAppPurchasePriceSchedules/{schedule_id}/manualPrices",
+            params=params,
+        )
+    except RuntimeError as exc:
+        if _is_not_found_error(exc):
+            logger.debug("Manual price list not found for schedule %s: %s", schedule_id, exc)
+            return []
+        raise
+
+    data = response.get("data", []) if isinstance(response, dict) else []
+    return data or []
+
+
+def _clear_existing_manual_prices(inapp_id: str) -> None:
+    schedule_id = _fetch_price_schedule_id(inapp_id)
+    if not schedule_id:
+        return
+
+    manual_prices = _list_manual_prices(schedule_id)
+    for entry in manual_prices:
+        entry_id = entry.get("id")
+        if not entry_id:
+            continue
+        try:
+            _request("DELETE", f"/v1/inAppPurchasePrices/{entry_id}")
+        except RuntimeError as exc:
+            if _is_not_found_error(exc):
+                continue
+            logger.debug(
+                "Failed to delete manual price %s for IAP %s: %s",
+                entry_id,
+                inapp_id,
+                exc,
+            )
+
+
+def get_iap_price_krw(inapp_id: str) -> Optional[Dict[str, str]]:
+    """Fetch KRW price for a given IAP via price schedule manual prices endpoint.
+
+    Uses: GET /v1/inAppPurchasePriceSchedules/{SCHEDULE_ID}/manualPrices
+          ?filter[territory]=KOR
+          &include=inAppPurchasePricePoint,territory
+
+    The current price is the manual price with startDate === null. The actual price
+    values (customerPrice, proceeds) are retrieved from the related inAppPurchasePricePoint.
+
+    Returns a dict like {"currency": "KRW", "customerPrice": str, "proceeds": str}
+    or None if not found.
+    """
+    if not inapp_id:
+        return None
+
+    schedule_id = _fetch_price_schedule_id(inapp_id)
+    if not schedule_id:
+        logger.debug("No price schedule available for IAP %s", inapp_id)
+        return None
+
+    try:
+        resp = _request(
+            "GET",
+            f"/v1/inAppPurchasePriceSchedules/{schedule_id}/manualPrices",
+            params={
+                "filter[territory]": "KOR",
+                "include": "inAppPurchasePricePoint,territory",
+            },
+        )
+    except RuntimeError as exc:
+        logger.debug(
+            "Failed to fetch KRW price for IAP %s via price schedules: %s",
+            inapp_id,
+            exc,
+        )
+        return None
+
+    data = resp.get("data", [])
+    if not data:
+        logger.debug("No manual prices found for IAP %s (KOR territory)", inapp_id)
+        return None
+
+    # Find the current price (startDate === null)
+    current_price_entry = None
+    for entry in data:
+        attrs = entry.get("attributes", {})
+        start_date = attrs.get("startDate")
+        if start_date is None:
+            current_price_entry = entry
+            break
+
+    if not current_price_entry:
+        logger.debug("No current price (startDate=null) found for IAP %s (KOR territory)", inapp_id)
+        return None
+
+    # Get the price point ID from the relationship
+    relationships = current_price_entry.get("relationships", {})
+    price_point_data = relationships.get("inAppPurchasePricePoint", {}).get("data", {})
+    price_point_id = price_point_data.get("id", "") if isinstance(price_point_data, dict) else ""
+
+    if not price_point_id:
+        logger.debug("No price point relationship found for current price of IAP %s", inapp_id)
+        return None
+
+    # Find the price point in included resources
+    included = resp.get("included", [])
+    price_point_map = _index_included(included, "inAppPurchasePricePoints")
+    territory_map = _index_included(included, "territories")
+
+    price_point_obj = price_point_map.get(price_point_id)
+    if not price_point_obj or not isinstance(price_point_obj, dict):
+        logger.debug("Price point %s not found in included resources for IAP %s", price_point_id, inapp_id)
+        return None
+
+    # Get customerPrice and proceeds from price point attributes
+    price_point_attrs = price_point_obj.get("attributes", {})
+    customer_price = price_point_attrs.get("customerPrice")
+    proceeds = price_point_attrs.get("proceeds")
+
+    # Get currency from territory (default to KRW)
+    territory_data = relationships.get("territory", {}).get("data", {})
+    territory_id = territory_data.get("id", "") if isinstance(territory_data, dict) else ""
+
+    currency = "KRW"
+    if territory_id:
+        terr_obj = territory_map.get(territory_id) or {}
+        terr_attrs = terr_obj.get("attributes", {}) if isinstance(terr_obj, dict) else {}
+        currency = terr_attrs.get("currency", "KRW")
+
+    if customer_price is None:
+        logger.debug("No customerPrice found in price point %s for IAP %s", price_point_id, inapp_id)
+        return None
+
+    # Convert to string (it might be a number)
+    customer_price_str = str(customer_price)
+    proceeds_str = str(proceeds or "")
+    price_tier = price_point_attrs.get("priceTier")
+
+    logger.info(
+        "Fetched KRW price for IAP %s: %s %s (proceeds: %s, tier: %s)",
+        inapp_id,
+        currency,
+        customer_price_str,
+        proceeds_str,
+        price_tier or "",
+    )
+
+    return {
+        "currency": str(currency),
+        "customerPrice": customer_price_str,
+        "proceeds": proceeds_str,
+        "priceTier": str(price_tier or ""),
+    }
+
+
+def _should_skip_krw_price_fetch() -> bool:
+    raw = os.getenv("APPLE_SKIP_KRW_PRICE_FETCH", "")
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _fetch_krw_price_with_retry(
+    inapp_id: str, *, max_attempts: int = 3, initial_delay: float = 1.0
+) -> Optional[Dict[str, str]]:
+    if not inapp_id or not inapp_id.isdigit():
+        return None
+    if _should_skip_krw_price_fetch():
+        logger.info(
+            "Skipping KRW price fetch for IAP %s (APPLE_SKIP_KRW_PRICE_FETCH enabled)",
+            inapp_id,
+        )
+        return None
+
+    delay = initial_delay
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            price = get_iap_price_krw(inapp_id)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "KRW price fetch failed for IAP %s (attempt %d/%d): %s",
+                inapp_id,
+                attempt,
+                max_attempts,
+                exc,
+            )
+            price = None
+
+        if price:
+            return price
+
+        if attempt < max_attempts:
+            logger.info(
+                "Retrying KRW price fetch for IAP %s (attempt %d/%d) after %.1fs",
+                inapp_id,
+                attempt + 1,
+                max_attempts,
+                delay,
+            )
+            time.sleep(min(delay, 5.0))
+            delay *= 2
+
+    if last_error:
+        logger.warning(
+            "KRW price fetch failed for IAP %s after %d attempts. Last error: %s",
+            inapp_id,
+            max_attempts,
+            last_error,
+        )
+    else:
+        logger.warning(
+            "KRW price data unavailable for IAP %s after %d attempts.", inapp_id, max_attempts
+        )
+    return None
+
+
 def _get_inapp_purchase_snapshot(
-    inapp_id: str, *, include_relationships: bool = True
+    inapp_id: str,
+    *,
+    include_relationships: bool = True,
+    summary_only: bool = False,
 ) -> Dict[str, Any]:
     resolved_id, resolved_type = _resolve_inapp_v2_identifier(
         inapp_id, "inAppPurchases"
@@ -1740,23 +2157,15 @@ def _get_inapp_purchase_snapshot(
     for idx, path in enumerate(path_candidates, 1):
         logger.debug("Trying path %d/%d: %s for IAP ID=%s", idx, len(path_candidates), path, lookup_id)
         try:
-            # V2 API uses different include parameter
-            if path.startswith("/v2/"):
-                params = (
-                    {
-                        "include": "inAppPurchaseLocalizations"
-                    }
-                    if include_relationships
-                    else None
-                )
-            else:
-                params = (
-                    {
-                        "include": "inAppPurchaseLocalizations,inAppPurchasePrices"
-                    }
-                    if include_relationships
-                    else None
-                )
+            params: Optional[Dict[str, Any]] = None
+            # Note: Apple API has changed, fields and include parameters are no longer reliable
+            # Fetch without parameters first, then fetch relationships separately if needed
+            if include_relationships:
+                # Try with include parameter, but be prepared to fallback
+                params = {
+                    "include": "inAppPurchaseLocalizations",
+                    "fields[inAppPurchaseLocalizations]": "locale,name"
+                }
             response = _request("GET", path, params=params)
         except RuntimeError as exc:
             if include_relationships and _is_parameter_error(exc):
@@ -1774,8 +2183,16 @@ def _get_inapp_purchase_snapshot(
                     record["localizations"] = _fetch_inapp_localizations(
                         lookup_id, resource_type
                     )
-                    record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
-                    return record
+                    # Fetch prices but don't fail if it errors
+                    try:
+                        record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+                    except Exception as price_exc:
+                        logger.debug("Failed to fetch prices for IAP %s: %s", lookup_id, price_exc)
+                        record["prices"] = []
+                    return _finalize_inapp_record(
+                        record,
+                        summary_only=summary_only,
+                    )
                 except RuntimeError as inner_exc:
                     if (
                         _is_path_error(inner_exc)
@@ -1829,7 +2246,10 @@ def _get_inapp_purchase_snapshot(
             if not include_relationships:
                 result.pop("localizations", None)
                 result.pop("prices", None)
-            return result
+            return _finalize_inapp_record(
+                result,
+                summary_only=summary_only,
+            )
         
         # If canonicalization returned empty, try fetching without include
         if include_relationships:
@@ -1840,8 +2260,16 @@ def _get_inapp_purchase_snapshot(
                 record["localizations"] = _fetch_inapp_localizations(
                     lookup_id, resource_type
                 )
-                record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
-                return record
+                # Fetch prices but don't fail if it errors
+                try:
+                    record["prices"] = _fetch_inapp_prices(lookup_id, resource_type)
+                except Exception as price_exc:
+                    logger.debug("Failed to fetch prices for IAP %s: %s", lookup_id, price_exc)
+                    record["prices"] = []
+                return _finalize_inapp_record(
+                    record,
+                    summary_only=summary_only,
+                )
             except RuntimeError as inner_exc:
                 if (
                     _is_path_error(inner_exc)
@@ -1874,8 +2302,28 @@ def _format_iso8601(date: Optional[str]) -> Optional[str]:
     return parsed.astimezone(_dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+APPLE_IAP_LOCALE_OVERRIDES = {
+    "ko-kr": "ko",
+    "en-sg": "en-GB",
+    "zh-tw": "zh-Hant",
+}
+
+
+def _normalize_locale_code(locale: Optional[str]) -> Optional[str]:
+    if not locale:
+        return None
+    trimmed = locale.strip()
+    if not trimmed:
+        return None
+    mapped = APPLE_IAP_LOCALE_OVERRIDES.get(trimmed.lower())
+    if mapped:
+        return mapped
+    return trimmed
+
+
 def _normalize_localizations(
-    localizations: Iterable[Dict[str, Any]]
+    localizations: Iterable[Dict[str, Any]],
+    base_territory: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     normalized: List[Dict[str, Any]] = []
     for entry in localizations:
@@ -1903,23 +2351,30 @@ def _normalize_localizations(
                     "content_type": content_type or "image/png",
                     "data": encoded,
                 }
+        locale_code = _normalize_locale_code(data.get("locale"))
+        if not locale_code:
+            continue
         normalized.append(
             {
-                "locale": data.get("locale"),
+                "locale": locale_code,
                 "name": data.get("name", ""),
                 "description": data.get("description", ""),
                 "review_screenshot": review_payload,
             }
         )
+
     return normalized
 
 
 def _ensure_localizations(
     inapp_id: str,
     localizations: Iterable[Dict[str, Any]],
+    *,
+    base_territory: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
-    normalized = _normalize_localizations(localizations)
-    existing_entries = _list_localization_entries(inapp_id)
+    normalized = _normalize_localizations(localizations, base_territory)
+    resource_type = "inAppPurchasesV2" if inapp_id.isdigit() else "inAppPurchases"
+    existing_entries = _list_localization_entries(inapp_id, resource_type)
     existing_by_locale = {
         entry.get("attributes", {}).get("locale"): entry
         for entry in existing_entries
@@ -1942,29 +2397,45 @@ def _ensure_localizations(
         name = loc.get("name", "")
         description = loc.get("description", "")
         existing_entry = existing_by_locale.get(locale)
-        payload = {
-            "data": {
-                "type": "inAppPurchaseLocalizations",
-                "attributes": {
-                    "name": name,
-                    "description": description,
-                    "locale": locale,
-                },
-                "relationships": {
-                    "inAppPurchase": {"data": {"type": "inAppPurchases", "id": inapp_id}}
-                },
+        if inapp_id.isdigit():
+            localization_payload = {
+                "data": {
+                    "type": "inAppPurchaseLocalizations",
+                    "attributes": {
+                        "name": name,
+                        "description": description,
+                        "locale": locale,
+                    },
+                    "relationships": {
+                        "inAppPurchaseV2": {"data": {"type": "inAppPurchases", "id": inapp_id}}
+                    },
+                }
             }
-        }
+        else:
+            localization_payload = {
+                "data": {
+                    "type": "inAppPurchaseLocalizations",
+                    "attributes": {
+                        "name": name,
+                        "description": description,
+                        "locale": locale,
+                    },
+                    "relationships": {
+                        "inAppPurchase": {"data": {"type": "inAppPurchases", "id": inapp_id}}
+                    },
+                }
+            }
+
         if existing_entry and existing_entry.get("id"):
             _request(
                 "PATCH",
                 f"/inAppPurchaseLocalizations/{existing_entry['id']}",
-                json=payload,
+                json=localization_payload,
             )
         else:
-            _request("POST", "/inAppPurchaseLocalizations", json=payload)
+            _request("POST", "/inAppPurchaseLocalizations", json=localization_payload)
 
-    refreshed = _list_localization_entries(inapp_id)
+    refreshed = _list_localization_entries(inapp_id, resource_type)
     locale_ids: Dict[str, str] = {}
     for entry in refreshed:
         entry_id = entry.get("id")
@@ -2106,6 +2577,12 @@ class _PricePointCacheEntry:
     result: Dict[str, Any]
 
 
+@dataclass
+class _PriceTierCacheEntry:
+    expires_at: float
+    data: List[Dict[str, Any]]
+
+
 _PRICE_POINT_CACHE: Dict[str, _PricePointCacheEntry] = {}
 
 
@@ -2212,74 +2689,551 @@ def _get_price_point(price_tier: str, territory: str) -> Dict[str, Any]:
     return entry
 
 
-def _replace_price_schedule(
-    inapp_id: str, price_tier: Optional[str], territory: str
+def _fetch_all_pages(
+    path: str,
+    *,
+    params: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+
+    while True:
+        page_params = dict(params or {})
+        if cursor:
+            page_params["page[cursor]"] = cursor
+
+        response = _request("GET", path, params=page_params or None)
+        entries.extend(response.get("data", []) or [])
+
+        cursor = _extract_cursor(response.get("links", {}).get("next"))
+        if not cursor:
+            break
+
+    return entries
+
+
+def _price_tier_sort_key(value: str) -> Tuple[int, str]:
+    digits = "".join(ch for ch in value if ch.isdigit())
+    return (int(digits) if digits else 0, value)
+
+
+def _get_cached_price_tiers(territory: str) -> Optional[List[Dict[str, Any]]]:
+    territory_key = (territory or "KOR").strip().upper()
+    now = time.time()
+
+    with _PRICE_TIER_CACHE_LOCK:
+        entry = _PRICE_TIER_CACHE.get(territory_key)
+        if entry and entry.expires_at > now:
+            return [dict(item) for item in entry.data]
+        if entry:
+            _PRICE_TIER_CACHE.pop(territory_key, None)
+    return None
+
+
+def _set_cached_price_tiers(
+    territory: str, tiers: List[Dict[str, Any]], *, ttl: Optional[int] = None
 ) -> None:
+    territory_key = (territory or "KOR").strip().upper()
+    expires_at = time.time() + (ttl if ttl is not None else _PRICE_TIER_CACHE_TTL)
+
+    with _PRICE_TIER_CACHE_LOCK:
+        _PRICE_TIER_CACHE[territory_key] = _PriceTierCacheEntry(
+            expires_at=expires_at, data=[dict(item) for item in tiers]
+        )
+
+
+def _get_price_point_reference_iap_id(*, force_refresh: bool = False) -> Optional[str]:
+    global _PRICE_POINT_REFERENCE_IAP_ID
+
+    env_value = os.getenv("APPLE_PRICE_POINT_REFERENCE_IAP_ID", "").strip()
+    if env_value:
+        return env_value
+
+    with _PRICE_POINT_REFERENCE_LOCK:
+        if not force_refresh and _PRICE_POINT_REFERENCE_IAP_ID:
+            return _PRICE_POINT_REFERENCE_IAP_ID
+
+    app_id = _get_app_id()
     try:
-        existing_prices = _request(
-            "GET", f"/inAppPurchases/{inapp_id}/prices"
-        ).get("data", [])
+        response = _request(
+            "GET",
+            f"/v1/apps/{app_id}/inAppPurchasesV2",
+            params={"limit": 1},
+        )
     except RuntimeError as exc:
-        if (
-            _is_path_error(exc)
-            or _is_forbidden_noop_error(exc)
-            or _is_forbidden_error(exc)
-        ):
-            logger.warning(
-                "Apple API denied price schedule lookup for %s; proceeding without "
-                "removing existing prices.",
-                inapp_id,
-            )
-            existing_prices = []
-        else:
-            raise
-    for entry in existing_prices or []:
+        logger.debug(
+            "Failed to fetch reference IAP ID for app %s: %s",
+            app_id,
+            exc,
+        )
+        return None
+
+    for entry in response.get("data", []) or []:
         entry_id = entry.get("id")
         if entry_id:
-            _request("DELETE", f"/inAppPurchasePrices/{entry_id}")
+            with _PRICE_POINT_REFERENCE_LOCK:
+                _PRICE_POINT_REFERENCE_IAP_ID = entry_id
+            return entry_id
 
-    if not price_tier:
+    logger.warning(
+        "No in-app purchases found for app %s when attempting to cache reference IAP ID",
+        app_id,
+    )
+    return None
+
+
+def _list_price_points_v2(
+    iap_id: str,
+    territory: str,
+) -> List[Dict[str, Any]]:
+    normalized_territory = (territory or "KOR").strip().upper()
+    tiers: Dict[str, Dict[str, Any]] = {}
+    cursor: Optional[str] = None
+    use_page_cursor_param = False
+
+    while True:
+        params: Dict[str, Any] = {
+            "filter[territory]": normalized_territory,
+            "include": "territory",
+            "limit": 200,
+        }
+        if cursor:
+            cursor_key = "page[cursor]" if use_page_cursor_param else "cursor"
+            params[cursor_key] = cursor
+
+        try:
+            response = _request(
+                "GET",
+                f"/v2/inAppPurchases/{iap_id}/pricePoints",
+                params=params,
+            )
+        except AppleStoreApiError as exc:
+            if cursor and _is_parameter_error(exc):
+                details = " ".join(
+                    [
+                        str(entry.get("detail") or entry.get("title") or "").lower()
+                        for entry in exc.errors
+                    ]
+                )
+                if "page[cursor]" in details and use_page_cursor_param:
+                    logger.info(
+                        "Apple API rejected page[cursor] for price points; retrying with cursor parameter."
+                    )
+                    use_page_cursor_param = False
+                    continue
+                if " cursor " in f" {details} " and not use_page_cursor_param:
+                    logger.info(
+                        "Apple API rejected cursor parameter for price points; retrying with page[cursor]."
+                    )
+                    use_page_cursor_param = True
+                    continue
+            raise
+
+        included = response.get("included", [])
+        territory_map = _index_included(included, "territories")
+
+        for entry in response.get("data", []) or []:
+            attributes = entry.get("attributes") or {}
+            tier_id = attributes.get("priceTier")
+            if not tier_id:
+                continue
+
+            currency = attributes.get("currency")
+            if not currency:
+                relationships = entry.get("relationships", {}) or {}
+                territory_data = relationships.get("territory", {}).get("data", {})
+                territory_id = (
+                    territory_data.get("id") if isinstance(territory_data, dict) else ""
+                )
+                if territory_id:
+                    territory_obj = territory_map.get(territory_id) or {}
+                    territory_attrs = (
+                        territory_obj.get("attributes", {})
+                        if isinstance(territory_obj, dict)
+                        else {}
+                    )
+                    currency = territory_attrs.get("currency")
+
+            tiers[tier_id] = {
+                "tier": tier_id,
+                "currency": currency,
+                "customerPrice": attributes.get("customerPrice"),
+                "proceeds": attributes.get("proceeds"),
+                "pricePointId": entry.get("id"),
+            }
+
+        cursor = _extract_cursor(response.get("links", {}).get("next"))
+        if not cursor:
+            break
+
+    return [tiers[key] for key in sorted(tiers.keys(), key=_price_tier_sort_key)]
+
+
+def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
+    normalized_territory = (territory or "KOR").strip().upper() or "KOR"
+
+    cached = _get_cached_price_tiers(normalized_territory)
+    if cached is not None:
+        return cached
+
+    last_error: Optional[Exception] = None
+    reference_id = _get_price_point_reference_iap_id()
+
+    if reference_id:
+        current_id = reference_id
+        for attempt in range(2):
+            try:
+                tiers = _list_price_points_v2(current_id, normalized_territory)
+            except AppleStoreApiError as exc:
+                last_error = exc
+                if _is_not_found_error(exc) and attempt == 0:
+                    logger.info(
+                        "Reference IAP %s is not valid for price point lookup; refreshing cache.",
+                        current_id,
+                    )
+                    refreshed_id = _get_price_point_reference_iap_id(force_refresh=True)
+                    if refreshed_id and refreshed_id != current_id:
+                        current_id = refreshed_id
+                        continue
+                elif _is_forbidden_error(exc):
+                    logger.info(
+                        "Apple API denied access to price points via /v2 endpoint; "
+                        "falling back to app-level price point lookup."
+                    )
+                else:
+                    logger.debug(
+                        "Failed to load price tiers via /v2 pricePoints for IAP %s: %s",
+                        current_id,
+                        exc,
+                    )
+                break
+            except RuntimeError as exc:
+                last_error = exc
+                logger.debug(
+                    "Runtime error while loading price tiers via /v2 pricePoints: %s",
+                    exc,
+                )
+                break
+            else:
+                _set_cached_price_tiers(normalized_territory, tiers)
+                return tiers
+    else:
+        logger.info(
+            "No reference IAP ID available for price point lookup; "
+            "falling back to app-level price point APIs."
+        )
+
+    tiers = _list_price_tiers_via_app_price_points(normalized_territory)
+    if tiers:
+        _set_cached_price_tiers(normalized_territory, tiers)
+        return tiers
+
+    if not tiers and last_error:
+        raise last_error
+    return tiers
+
+
+def _resolve_price_point_for_inapp(
+    inapp_id: str,
+    territory: str,
+    price_krw: Optional[int],
+) -> Dict[str, Optional[Any]]:
+    """Resolve price point ID from IAP-specific price points (not app-level).
+    
+    Uses GET /v2/inAppPurchases/{id}/pricePoints?filter[territory]=KOR to get
+    all available price points for this specific IAP, then matches the closest one
+    to the target KRW price.
+    
+    Note: We must use IAP-specific price points because app-level price points
+    (from /v1/apps/{id}/appPricePoints) have incompatible IDs that cannot be
+    used in inAppPurchasePriceSchedules.
+    
+    Args:
+        inapp_id: The IAP ID
+        territory: Territory code (e.g., "KOR")
+        price_krw: Target price in KRW
+        
+    Returns:
+        Dict with price_point_id, price_tier, matched_price, difference
+    """
+    normalized_territory = (territory or "KOR").strip().upper() or "KOR"
+
+    if not inapp_id or price_krw is None:
+        return {
+            "price_point_id": None,
+            "price_tier": None,
+            "matched_price": None,
+            "difference": None,
+        }
+
+    try:
+        # Use IAP-specific price points (not app-level)
+        # This ensures we get compatible price point IDs
+        price_points = _list_price_points_v2(inapp_id, normalized_territory)
+        logger.info(
+            "Fetched %d IAP-specific price points for IAP %s in territory %s (target: %s KRW)",
+            len(price_points),
+            inapp_id,
+            normalized_territory,
+            price_krw,
+        )
+    except AppleStoreApiError as exc:
+        logger.warning(
+            "Failed to load IAP-specific price points for IAP %s in territory %s: %s",
+            inapp_id,
+            normalized_territory,
+            exc,
+        )
+        return {
+            "price_point_id": None,
+            "price_tier": None,
+            "matched_price": None,
+            "difference": None,
+        }
+    except Exception as exc:
+        logger.error(
+            "Unexpected error loading IAP-specific price points for IAP %s in territory %s: %s",
+            inapp_id,
+            normalized_territory,
+            exc,
+        )
+        return {
+            "price_point_id": None,
+            "price_tier": None,
+            "matched_price": None,
+            "difference": None,
+        }
+
+    if not price_points:
+        logger.warning(
+            "No price points available for IAP %s in territory %s. Cannot match price %s KRW.",
+            inapp_id,
+            normalized_territory,
+            price_krw,
+        )
+        return {
+            "price_point_id": None,
+            "price_tier": None,
+            "matched_price": None,
+            "difference": None,
+        }
+
+    target_value = Decimal(price_krw)
+    best_entry: Optional[Dict[str, Any]] = None
+    best_diff: Optional[Decimal] = None
+
+    for entry in price_points:
+        price_str = entry.get("customerPrice")
+        if not price_str:
+            continue
+        try:
+            value = Decimal(str(price_str))
+        except (InvalidOperation, TypeError):
+            continue
+        diff = abs(value - target_value)
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best_entry = entry
+        elif best_diff is not None and diff == best_diff and best_entry:
+            try:
+                existing_value = Decimal(str(best_entry.get("customerPrice")))
+            except (InvalidOperation, TypeError):
+                existing_value = value
+            if value < existing_value:
+                best_entry = entry
+
+    if not best_entry:
+        logger.warning(
+            "Unable to match price point for %s KRW in territory %s for IAP %s. "
+            "Available price points may not include this exact amount.",
+            price_krw,
+            normalized_territory,
+            inapp_id,
+        )
+        return {
+            "price_point_id": None,
+            "price_tier": None,
+            "matched_price": None,
+            "difference": None,
+        }
+
+    try:
+        matched_price = int(Decimal(str(best_entry.get("customerPrice"))))
+    except (InvalidOperation, TypeError, ValueError):
+        matched_price = price_krw
+
+    logger.info(
+        "Resolved IAP-specific price point %s (tier %s) for IAP %s in territory %s: %s KRW -> %s KRW (diff: %s)",
+        best_entry.get("pricePointId"),
+        best_entry.get("tier"),
+        inapp_id,
+        normalized_territory,
+        price_krw,
+        matched_price,
+        best_diff,
+    )
+
+    return {
+        "price_point_id": best_entry.get("pricePointId"),
+        "price_tier": best_entry.get("tier"),
+        "matched_price": matched_price,
+        "difference": best_diff,
+    }
+
+
+def _replace_price_schedule(
+    inapp_id: str,
+    territory: str,
+    *,
+    price_point_id: Optional[str] = None,
+    price_tier: Optional[str] = None,
+) -> None:
+    def _build_manual_price_entry(
+        price_point_identifier: str,
+        territory_id: str,
+        local_id: str,
+    ) -> Tuple[Dict[str, str], Dict[str, Any]]:
+        """Build manual price entry with local ID format required by Apple API.
+        
+        Apple API requires local IDs in the format '${local-id}' for inline creation.
+        """
+        territory_value = (territory_id or "KOR").strip().upper() or "KOR"
+        relationship = {"type": "inAppPurchasePrices", "id": local_id}
+        included = {
+            "type": "inAppPurchasePrices",
+            "id": local_id,
+            "attributes": {
+                "startDate": None,
+                "endDate": None,
+            },
+            "relationships": {
+                "inAppPurchasePricePoint": {
+                    "data": {
+                        "type": "inAppPurchasePricePoints",
+                        "id": price_point_identifier,
+                    }
+                },
+                "territory": {
+                    "data": {
+                        "type": "territories",
+                        "id": territory_value,
+                    }
+                },
+            },
+        }
+        return relationship, included
+
+    manual_relationships: List[Dict[str, str]] = []
+    included_resources: List[Dict[str, Any]] = []
+
+    if price_point_id:
+        # Use local ID format: ${local-id}
+        local_id = "${manual-price-1}"
+        rel, included = _build_manual_price_entry(price_point_id, territory, local_id)
+        manual_relationships.append(rel)
+        included_resources.append(included)
+    elif price_tier:
+        for idx, current_territory in enumerate(_collect_manual_price_territories(territory), start=1):
+            try:
+                price_point = _get_price_point(price_tier, current_territory)
+            except RuntimeError as exc:
+                if current_territory == territory.upper():
+                    raise
+                logger.warning(
+                    "Failed to load fixed price point for territory %s: %s",
+                    current_territory,
+                    exc,
+                )
+                continue
+
+            point_id = price_point.get("id")
+            if not point_id:
+                logger.debug(
+                    "Price point for territory %s did not include an ID; skipping.",
+                    current_territory,
+                )
+                continue
+
+            # Use local ID format: ${local-id} with index
+            local_id = f"${{manual-price-{idx}}}"
+            rel, included = _build_manual_price_entry(point_id, current_territory, local_id)
+            manual_relationships.append(rel)
+            included_resources.append(included)
+
+    if not manual_relationships:
+        logger.warning(
+            "No manual price entries built for IAP %s; price schedule will not be created.",
+            inapp_id,
+        )
         return
 
-    territories: List[str] = [territory.upper()]
-    for fixed_territory in _FIXED_PRICE_TERRITORIES:
-        normalized = fixed_territory.upper()
-        if normalized and normalized not in territories:
-            territories.append(normalized)
+    logger.info(
+        "Creating price schedule for IAP %s with %d manual price entries (base territory: %s)",
+        inapp_id,
+        len(manual_relationships),
+        (territory or "KOR").upper(),
+    )
 
-    for current_territory in territories:
-        try:
-            price_point = _get_price_point(price_tier, current_territory)
-        except RuntimeError as exc:
-            if current_territory == territory.upper():
-                raise
-            logger.warning(
-                "Failed to load fixed price point for territory %s: %s",
-                current_territory,
-                exc,
-            )
-            continue
+    _clear_existing_manual_prices(inapp_id)
 
-        attributes = price_point.get("attributes") or {}
-        start_date = _format_iso8601(attributes.get("startDate"))
-        payload = {
-            "data": {
-                "type": "inAppPurchasePrices",
-                "attributes": {"startDate": start_date},
-                "relationships": {
-                    "inAppPurchase": {
-                        "data": {"type": "inAppPurchases", "id": inapp_id}
-                    },
-                    "inAppPurchasePricePoint": {
-                        "data": {
-                            "type": "inAppPurchasePricePoints",
-                            "id": price_point.get("id"),
-                        }
-                    },
+    payload: Dict[str, Any] = {
+        "data": {
+            "type": "inAppPurchasePriceSchedules",
+            "relationships": {
+                "inAppPurchase": {
+                    "data": {"type": "inAppPurchases", "id": inapp_id}
                 },
-            }
+                "baseTerritory": {
+                    "data": {"type": "territories", "id": (territory or "KOR").upper()}
+                },
+                "manualPrices": {
+                    "data": manual_relationships,
+                },
+            },
         }
-        _request("POST", "/inAppPurchasePrices", json=payload)
+    }
+
+    if included_resources:
+        payload["included"] = included_resources
+
+    try:
+        response = _request("POST", "/v1/inAppPurchasePriceSchedules", json=payload)
+    except (AppleStoreApiError, RuntimeError) as exc:
+        logger.error(
+            "Failed to create price schedule for IAP %s: %s",
+            inapp_id,
+            exc,
+        )
+        raise
+    else:
+        created_id = (
+            (response.get("data") or {}).get("id")
+            if isinstance(response, dict)
+            else None
+        )
+        if created_id:
+            logger.info(
+                "Created price schedule %s for IAP %s with %d manual price entries",
+                created_id,
+                inapp_id,
+                len(manual_relationships),
+            )
+
+
+def _normalize_purchase_type_v2(purchase_type: str) -> str:
+    if not purchase_type:
+        return "CONSUMABLE"
+    normalized = purchase_type.replace("-", "_").replace(" ", "_").strip().lower()
+    mapping = {
+        "consumable": "CONSUMABLE",
+        "nonconsumable": "NON_CONSUMABLE",
+        "non_consumable": "NON_CONSUMABLE",
+        "nonrenewingsubscription": "NON_RENEWING_SUBSCRIPTION",
+        "non_renewing_subscription": "NON_RENEWING_SUBSCRIPTION",
+        "autorenewablesubscription": "AUTO_RENEWABLE_SUBSCRIPTION",
+        "auto_renewable_subscription": "AUTO_RENEWABLE_SUBSCRIPTION",
+    }
+    return mapping.get(normalized, "CONSUMABLE")
 
 
 def create_inapp_purchase(
@@ -2290,11 +3244,44 @@ def create_inapp_purchase(
     cleared_for_sale: bool,
     family_sharable: bool,
     review_note: Optional[str],
+    price_point_id: Optional[str],
     price_tier: Optional[str],
+    price_krw: Optional[int],
     base_territory: str,
     localizations: Iterable[Dict[str, str]],
 ) -> Dict[str, Any]:
-    payload = {
+    purchase_type_v2 = _normalize_purchase_type_v2(purchase_type)
+    app_id = _get_app_id()
+
+    v2_payload = {
+        "data": {
+            "type": "inAppPurchases",
+            "attributes": {
+                "name": reference_name,
+                "productId": product_id,
+                "inAppPurchaseType": purchase_type_v2,
+                "familySharable": family_sharable,
+            },
+            "relationships": {
+                "app": {
+                    "data": {"type": "apps", "id": app_id}
+                }
+            },
+        }
+    }
+
+    if review_note is not None:
+        v2_payload["data"]["attributes"]["reviewNote"] = review_note
+
+    try:
+        result = _request("POST", "/v2/inAppPurchases", json=v2_payload).get("data")
+        if not result or not result.get("id"):
+            raise RuntimeError("인앱 상품 생성에 실패했습니다.")
+    except AppleStoreApiError as exc:
+        if not (_is_parameter_error(exc) or _is_path_error(exc)):
+            raise
+        # Fallback to legacy V1 endpoint
+        payload_v1 = {
         "data": {
             "type": "inAppPurchases",
             "attributes": {
@@ -2312,18 +3299,33 @@ def create_inapp_purchase(
             },
         }
     }
-
-    result = _request("POST", "/inAppPurchases", json=payload).get("data")
-    if not result or not result.get("id"):
-        raise RuntimeError("인앱 상품 생성에 실패했습니다.")
+        result = _request("POST", "/inAppPurchases", json=payload_v1).get("data")
+        if not result or not result.get("id"):
+            raise RuntimeError("인앱 상품 생성에 실패했습니다.")
 
     inapp_id = result["id"]
     normalized_localizations, locale_ids = _ensure_localizations(
         inapp_id,
         localizations,
+        base_territory=base_territory,
     )
     _sync_review_screenshots(locale_ids, normalized_localizations)
-    _replace_price_schedule(inapp_id, price_tier, base_territory)
+
+    if not price_point_id and price_krw is not None:
+        # Resolve price point using the newly created IAP's price points
+        resolved = _resolve_price_point_for_inapp(inapp_id, base_territory, price_krw)
+        price_point_id = resolved.get("price_point_id") or price_point_id
+        price_tier = resolved.get("price_tier") or price_tier
+
+    if price_point_id or price_tier:
+        _replace_price_schedule(
+            inapp_id,
+            base_territory,
+            price_point_id=price_point_id,
+            price_tier=price_tier,
+        )
+    availability_territories = _collect_availability_territories(base_territory)
+    _update_iap_availability(inapp_id, available_territories=availability_territories)
 
     return _get_inapp_purchase_snapshot(inapp_id)
 
@@ -2335,7 +3337,9 @@ def update_inapp_purchase(
     cleared_for_sale: Optional[bool],
     family_sharable: Optional[bool],
     review_note: Optional[str],
+    price_point_id: Optional[str],
     price_tier: Optional[str],
+    price_krw: Optional[int],
     base_territory: str,
     localizations: Iterable[Dict[str, str]],
 ) -> Dict[str, Any]:
@@ -2362,62 +3366,304 @@ def update_inapp_purchase(
     normalized_localizations, locale_ids = _ensure_localizations(
         inapp_id,
         localizations,
+        base_territory=base_territory,
     )
     _sync_review_screenshots(locale_ids, normalized_localizations)
-    _replace_price_schedule(inapp_id, price_tier, base_territory)
+
+    if not price_point_id and price_krw is not None:
+        # Resolve price point using the IAP's price points
+        resolved = _resolve_price_point_for_inapp(inapp_id, base_territory, price_krw)
+        price_point_id = resolved.get("price_point_id") or price_point_id
+        price_tier = resolved.get("price_tier") or price_tier
+
+    if price_point_id or price_tier:
+        _replace_price_schedule(
+            inapp_id,
+            base_territory,
+            price_point_id=price_point_id,
+            price_tier=price_tier,
+        )
+    availability_territories = _collect_availability_territories(base_territory)
+    _update_iap_availability(inapp_id, available_territories=availability_territories)
 
     return _get_inapp_purchase_snapshot(inapp_id)
 
 
 def delete_inapp_purchase(inapp_id: str) -> None:
-    _request("DELETE", f"/inAppPurchases/{inapp_id}")
+    """Delete an IAP from App Store Connect.
+    
+    Uses DELETE /v2/inAppPurchases/{id} for V2 IAPs (numeric IDs)
+    or DELETE /inAppPurchases/{id} for V1 IAPs (UUIDs).
+    """
+    # Determine if this is a V2 IAP (numeric ID) or V1 IAP (UUID)
+    if inapp_id.isdigit():
+        # V2 IAP: use /v2/inAppPurchases/{id}
+        _request("DELETE", f"/v2/inAppPurchases/{inapp_id}")
+    else:
+        # V1 IAP: use /inAppPurchases/{id}
+        _request("DELETE", f"/inAppPurchases/{inapp_id}")
 
 
-def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
-    def _tier_sort_key(value: str) -> tuple[int, str]:
-        digits = "".join(ch for ch in value if ch.isdigit())
-        return (int(digits) if digits else 0, value)
+def _get_iap_availability_id(inapp_id: str) -> Optional[str]:
+    """Get the availability ID for an IAP.
+    
+    First tries to get it from the IAP's relationships.
+    If not found, tries to fetch the availability directly.
+    """
+    try:
+        # Try to get IAP details with relationships
+        if inapp_id.isdigit():
+            path = f"/v2/inAppPurchases/{inapp_id}"
+            params = {"include": "inAppPurchaseAvailability"}
+        else:
+            path = f"/inAppPurchases/{inapp_id}"
+            params = {"include": "inAppPurchaseAvailability"}
+        
+        response = _request("GET", path, params=params)
+        data = response.get("data", {})
+        
+        # Try to get availability ID from relationship
+        relationships = data.get("relationships", {})
+        availability_data = relationships.get("inAppPurchaseAvailability", {}).get("data", {})
+        availability_id = availability_data.get("id") if isinstance(availability_data, dict) else None
+        
+        if availability_id:
+            logger.debug("Found availability ID %s for IAP %s from relationship", availability_id, inapp_id)
+            return availability_id
+        
+        # If not in relationship, try to find in included resources
+        included = response.get("included", [])
+        for item in included:
+            if item.get("type") == "inAppPurchaseAvailabilities":
+                availability_id = item.get("id")
+                if availability_id:
+                    logger.debug("Found availability ID %s for IAP %s from included resources", availability_id, inapp_id)
+                    return availability_id
+        
+        logger.warning("Could not find availability ID for IAP %s", inapp_id)
+        return None
+        
+    except RuntimeError as exc:
+        logger.debug("Failed to get availability ID for IAP %s: %s", inapp_id, exc)
+        return None
 
-    def _collect_from_response(
-        tiers: Dict[str, Dict[str, Any]], response: Dict[str, Any]
-    ) -> None:
-        for entry in response.get("data", []) or []:
-            attributes = entry.get("attributes") or {}
-            tier_id = attributes.get("priceTier")
-            if not tier_id or tier_id in tiers:
-                continue
-            # Note: appPricePoints endpoint only returns customerPrice (not proceeds)
-            tiers[tier_id] = {
-                "tier": tier_id,
-                "currency": attributes.get("currency"),
-                "customerPrice": attributes.get("customerPrice"),
+
+def _update_iap_availability(inapp_id: str, available_territories: List[str] = None) -> Dict[str, Any]:
+    """Update IAP availability by creating a new availability resource.
+    
+    Note: Apple API does not allow UPDATE operations on inAppPurchaseAvailabilities.
+    We must create a new availability resource, which replaces the existing one.
+    
+    Args:
+        inapp_id: The IAP ID (not availability ID)
+        available_territories: List of territory codes. If empty list or None, 
+                             removes all territories (makes IAP unavailable).
+    
+    Returns:
+        Created availability resource
+    """
+    # Prepare territories list - empty list means unavailable in all territories
+    territories = available_territories if available_territories is not None else []
+    
+    try:
+        # Build payload for POST /v1/inAppPurchaseAvailabilities
+        # POST creates a new availability resource (which replaces existing one)
+        # DO NOT include id in the payload (it's a CREATE operation)
+        # MUST include inAppPurchase relationship
+        payload = {
+            "data": {
+                "type": "inAppPurchaseAvailabilities",
+                # No "id" field - this is a CREATE operation
+                "attributes": {
+                    # Set availableInNewTerritories to False when removing from sale
+                    "availableInNewTerritories": False if not territories else True,
+                },
+                "relationships": {
+                    "inAppPurchase": {
+                        "data": {
+                            "type": "inAppPurchases",
+                            "id": inapp_id,
+                        }
+                    },
+                    "availableTerritories": {
+                        "data": [
+                            {"type": "territories", "id": territory}
+                            for territory in territories
+                        ]
+                    }
+                }
             }
+        }
+        
+        # POST to create new availability (replaces existing one)
+        response = _request("POST", "/v1/inAppPurchaseAvailabilities", json=payload)
+        
+        created_data = response.get("data", {})
+        created_id = created_data.get("id", "")
+        
+        logger.info(
+            "Created new availability %s for IAP %s: territories=%s (availableInNewTerritories=%s)",
+            created_id,
+            inapp_id,
+            territories if territories else "[] (unavailable)",
+            False if not territories else True
+        )
+        
+        return created_data
+        
+    except RuntimeError as exc:
+        logger.error("Failed to create availability for IAP %s: %s", inapp_id, exc)
+        raise
 
-    tiers: Dict[str, Dict[str, Any]] = {}
+
+def remove_inapp_purchase_from_sale(inapp_id: str) -> Dict[str, Any]:
+    """Remove an IAP from sale by creating a new availability with no territories.
+    
+    This prevents new purchases but maintains access for existing purchasers.
+    Creates a new availability resource with empty availableTerritories list,
+    which replaces the existing availability.
+    """
+    try:
+        # Create new availability with empty territories list (removes from sale)
+        # This replaces the existing availability
+        _update_iap_availability(inapp_id, available_territories=[])
+        
+        # Return updated IAP details
+        return _get_inapp_purchase_snapshot(inapp_id, include_relationships=True)
+        
+    except RuntimeError as exc:
+        logger.error("Failed to remove IAP %s from sale: %s", inapp_id, exc)
+        # Fallback: try to use clearedForSale if availability update fails
+        logger.warning(
+            "Availability update failed for IAP %s, falling back to clearedForSale=False",
+            inapp_id
+        )
+        try:
+            if inapp_id.isdigit():
+                path = f"/v2/inAppPurchases/{inapp_id}"
+            else:
+                path = f"/inAppPurchases/{inapp_id}"
+            
+            payload = {
+                "data": {
+                    "type": "inAppPurchases",
+                    "id": inapp_id,
+                    "attributes": {
+                        "clearedForSale": False,
+                    },
+                }
+            }
+            _request("PATCH", path, json=payload)
+            return _get_inapp_purchase_snapshot(inapp_id, include_relationships=True)
+        except RuntimeError as fallback_exc:
+            logger.error("Fallback to clearedForSale also failed for IAP %s: %s", inapp_id, fallback_exc)
+            raise exc  # Raise original exception
+
+
+def _list_price_tiers_via_app_price_points(territory: str = "KOR") -> List[Dict[str, Any]]:
+    """List all price points for the app in the given territory.
+    
+    Uses GET /v1/apps/{id}/appPricePoints?filter[territory]=KOR to fetch
+    all available price points directly (not grouped by tier).
+    
+    Returns a list of price point entries, each with:
+    - pricePointId: The price point ID
+    - customerPrice: Customer price in the territory currency
+    - currency: Currency code
+    - tier: Price tier (if available)
+    - proceeds: Proceeds (if available)
+    """
+    def _collect_price_points_from_response(
+        price_points: List[Dict[str, Any]], response: Dict[str, Any]
+    ) -> None:
+        """Collect all price points from API response (no tier grouping)."""
+        for entry in response.get("data", []) or []:
+            if not isinstance(entry, dict):
+                continue
+
+            attributes = entry.get("attributes") or {}
+            relationships = entry.get("relationships") or {}
+            price_point_id = entry.get("id")
+            
+            if not price_point_id:
+                continue
+
+            currency = attributes.get("currency")
+            if not currency:
+                territory_data = relationships.get("territory", {}).get("data")
+                if isinstance(territory_data, dict):
+                    territory_attrs = territory_data.get("attributes", {})
+                    if isinstance(territory_attrs, dict):
+                        currency = territory_attrs.get("currency")
+
+            # Get tier if available (optional)
+            tier_id = attributes.get("priceTier")
+            if not tier_id:
+                rel_data = relationships.get("priceTier", {}).get("data")
+                if isinstance(rel_data, dict):
+                    tier_id = rel_data.get("id")
+
+            price_point_entry = {
+                "pricePointId": price_point_id,
+                "customerPrice": attributes.get("customerPrice"),
+                "proceeds": attributes.get("proceeds"),
+                "currency": currency,
+            }
+            
+            if tier_id:
+                price_point_entry["tier"] = tier_id
+
+            price_points.append(price_point_entry)
+
+    price_points: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
+    page_count = 0
 
     permission_message = (
         "Apple API 키에 인앱 가격 정보를 조회할 권한이 없습니다. "
-        "일부 API 키는 Admin 역할을 가지고 있더라도 inAppPurchasePricePoints 리소스에 대한 특정 권한이 없을 수 있습니다. "
-        "이것은 정상적인 동작이며 애플리케이션은 가격 티어 데이터 없이도 정상 작동합니다."
+        "일부 API 키는 Admin 역할을 가지고 있더라도 appPricePoints 리소스에 대한 특정 권한이 없을 수 있습니다. "
+        "이것은 정상적인 동작이며 애플리케이션은 가격 포인트 데이터 없이도 정상 작동합니다."
     )
     
+    global _PRICE_TIER_ACCESS_AVAILABLE
     # If we've previously detected that we don't have permission, return empty list
     # This avoids repeated API calls that will just fail
-    if not _INAPP_PRICE_RELATIONSHIP_AVAILABLE:
-        logger.warning(
-            "Price tier access is disabled due to missing permissions. "
-            "Returning empty price tier list."
+    if not _PRICE_TIER_ACCESS_AVAILABLE:
+        logger.error(
+            "Price point access is disabled due to missing permissions "
+            "(flag _PRICE_TIER_ACCESS_AVAILABLE=False). "
+            "Returning empty price point list. "
+            "If you believe you have the correct permissions, restart the server to reset this flag."
         )
         return []
+    
+    logger.info(
+        "Attempting to fetch price points for territory %s via appPricePoints API",
+        territory,
+    )
 
     try:
         while True:
             filters = {"filter[territory]": territory}
             response = _request_price_points(filters, limit=200, cursor=cursor)
-            _collect_from_response(tiers, response)
+            page_count += 1
+            before_count = len(price_points)
+            _collect_price_points_from_response(price_points, response)
+            after_count = len(price_points)
+            logger.debug(
+                "Price point fetch page %d: added %d price points (total: %d)",
+                page_count,
+                after_count - before_count,
+                after_count,
+            )
             cursor = _extract_cursor(response.get("links", {}).get("next"))
             if not cursor:
+                logger.info(
+                    "Successfully fetched %d price points for territory %s in %d pages",
+                    len(price_points),
+                    territory,
+                    page_count,
+                )
                 break
     except AppleStoreApiError as exc:
         if not _is_forbidden_error(exc):
@@ -2426,84 +3672,39 @@ def list_price_tiers(territory: str = "KOR") -> List[Dict[str, Any]]:
         # If we get a forbidden error with "no allowed operations", it means
         # the API key doesn't have access to price points at all
         if _is_forbidden_noop_error(exc):
+            if _PRICE_TIER_ACCESS_AVAILABLE:
+                _PRICE_TIER_ACCESS_AVAILABLE = False
             logger.info(
-                "Price tier information is not available with current API key permissions. "
-                "Even with Admin role, some API keys may not have the specific permission to read inAppPurchasePricePoints. "
-                "This is expected behavior and the application will work without price tier data."
+                "Price point information is not available with current API key permissions. "
+                "Even with Admin role, some API keys may not have the specific permission to read appPricePoints. "
+                "This is expected behavior and the application will work without price point data."
             )
             return []
         
         message = _compose_permission_error_message(exc, permission_message)
+        if _PRICE_TIER_ACCESS_AVAILABLE:
+            _PRICE_TIER_ACCESS_AVAILABLE = False
         logger.warning(
-            "Apple API permission error for price points; attempting tier enumeration as fallback."
+            "Apple API permission error for price points: %s. Returning empty list.",
+            message,
+        )
+        return []
+
+    if not price_points:
+        logger.warning(
+            "Apple API returned 0 price points for territory %s via appPricePoints endpoint.",
+            territory,
         )
 
-        tiers.clear()
-        chunk_size = 25
-        for index in range(0, len(_PRICE_TIER_GUESS_RANGE), chunk_size):
-            chunk = _PRICE_TIER_GUESS_RANGE[index : index + chunk_size]
-            try:
-                filters = {
-                    "filter[territory]": territory,
-                    "filter[priceTier]": ",".join(chunk),
-                }
-                response = _request_price_points(filters, limit=200)
-            except AppleStoreApiError as inner_exc:
-                if _is_parameter_error(inner_exc):
-                    logger.debug(
-                        "Ignoring parameter error when probing price tiers chunk %s",
-                        chunk,
-                    )
-                    continue
-                if _is_forbidden_noop_error(inner_exc):
-                    # No permissions for price points at all
-                    logger.warning(
-                        "No permission to access price points; returning empty tier list."
-                    )
-                    return []
-                if _is_forbidden_error(inner_exc):
-                    logger.debug(
-                        "Apple API forbade chunked price tier request; retrying tier-by-tier",
-                        extra={"chunk": chunk},
-                    )
-                    successful = False
-                    for tier in chunk:
-                        try:
-                            tier_filters = {
-                                "filter[territory]": territory,
-                                "filter[priceTier]": tier,
-                            }
-                            tier_response = _request_price_points(
-                                tier_filters, limit=1
-                            )
-                        except AppleStoreApiError as single_exc:
-                            if _is_parameter_error(single_exc):
-                                logger.debug(
-                                    "Ignoring parameter error when probing price tier %s",
-                                    tier,
-                                )
-                                continue
-                            if _is_forbidden_noop_error(single_exc):
-                                # If no permissions for price points, return empty list
-                                logger.warning(
-                                    "No permission to access price points; returning empty tier list."
-                                )
-                                return []
-                            if _is_forbidden_error(single_exc):
-                                message = _compose_permission_error_message(
-                                    single_exc, permission_message
-                                )
-                                raise AppleStorePermissionError(message) from single_exc
-                            raise
-                        _collect_from_response(tiers, tier_response)
-                        successful = True
-                    if successful:
-                        continue
-                    message = _compose_permission_error_message(
-                        inner_exc, permission_message
-                    )
-                    raise AppleStorePermissionError(message) from inner_exc
-                raise
-            _collect_from_response(tiers, response)
+    # Sort by customerPrice for easier matching
+    try:
+        price_points.sort(
+            key=lambda x: (
+                Decimal(str(x.get("customerPrice") or "0")) if x.get("customerPrice") else Decimal("0")
+            )
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        # If sorting fails, return as-is
+        pass
 
-    return [tiers[key] for key in sorted(tiers.keys(), key=_tier_sort_key)]
+    return price_points

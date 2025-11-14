@@ -15,10 +15,11 @@ import subprocess
 import zipfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple
 
 from contextlib import asynccontextmanager
 from functools import wraps
+import threading
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,24 +27,27 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 from dotenv import load_dotenv
+from datetime import datetime, date
 
 from apple_store import (
     AppleStoreConfigError,
     AppleStorePermissionError,
     create_inapp_purchase as create_apple_inapp_purchase,
     delete_inapp_purchase as delete_apple_inapp_purchase,
+    remove_inapp_purchase_from_sale as remove_apple_inapp_purchase_from_sale,
     get_all_inapp_purchases,
     get_inapp_purchase_detail as get_apple_inapp_purchase_detail,
     get_inapp_purchase_ids_lightweight,
     get_fixed_price_territories,
     list_price_tiers as list_apple_price_tiers,
+    get_iap_price_krw,
     setup_interrupt_handler,
     update_inapp_purchase as update_apple_inapp_purchase,
 )
 from google_play import (
-    create_managed_inapp,
+    create_onetime_product,
     delete_inapp_product,
-    get_all_inapp_products,
+    get_all_google_play_products,
     update_managed_inapp,
 )
 from price_templates import (
@@ -54,21 +58,74 @@ from price_templates import (
 )
 from product_cache import (
     DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
     delete_product as delete_cached_product,
     get_cached_products,
+    get_cached_products_only,
     get_paginated_products,
     refresh_products_from_remote,
     upsert_product as upsert_cached_product,
+    get_metadata_value,
+    set_metadata_value,
 )
 
 load_dotenv()
 
 
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-)
+class DailyLogFileHandler(logging.Handler):
+    def __init__(self, directory: Path, encoding: str = "utf-8"):
+        super().__init__()
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.encoding = encoding
+        self._current_date: Optional[date] = None
+        self._stream: Optional[Any] = None
+        self._lock = threading.Lock()
+
+    def _log_path_for(self, date_obj: date) -> Path:
+        return self.directory / f"server_{date_obj.strftime('%Y-%m-%d')}.log"
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+            today = datetime.now().date()
+            with self._lock:
+                if today != self._current_date:
+                    self._current_date = today
+                    if self._stream:
+                        self._stream.close()
+                    log_path = self._log_path_for(today)
+                    self._stream = open(log_path, "a", encoding=self.encoding)
+                if self._stream:
+                    self._stream.write(msg + "\n")
+                    self._stream.flush()
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        try:
+            with self._lock:
+                if self._stream:
+                    self._stream.close()
+                    self._stream = None
+        finally:
+            super().close()
+
+
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+root_logger = logging.getLogger()
+root_logger.setLevel(getattr(logging, log_level_name, logging.INFO))
+root_logger.handlers.clear()
+formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+root_logger.addHandler(stream_handler)
+
+log_directory = Path(__file__).resolve().parent / "logs"
+file_handler = DailyLogFileHandler(log_directory)
+file_handler.setFormatter(formatter)
+root_logger.addHandler(file_handler)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +134,8 @@ setup_interrupt_handler()
 
 GOOGLE_STORE = "google"
 APPLE_STORE = "apple"
+PROTECTED_TIMEOUT = 300  # seconds between refresh attempts (unused placeholder)
+APPLE_PROTECTED_KEY = f"protected:{APPLE_STORE}"
 
 
 def _parse_locale_list(value: str | None) -> List[str]:
@@ -99,6 +158,10 @@ elif "en-GB" not in APPLE_LOCALIZATION_LOCALES:
     APPLE_LOCALIZATION_LOCALES.insert(0, "en-GB")
 
 APPLE_DEFAULT_LOCALIZATION_LOCALE = APPLE_LOCALIZATION_LOCALES[0]
+
+# Apple debug mode: limit IAP fetch to 400 items when enabled
+APPLE_DEBUG_MODE = os.getenv("APPLE_DEBUG_MODE", "false").lower() in ("true", "1", "yes")
+APPLE_DEBUG_MAX_ITEMS = 400
 
 app = FastAPI(title="iap-management-tool")
 
@@ -420,7 +483,8 @@ class AppleCreateInAppRequest(BaseModel):
     cleared_for_sale: bool = Field(default=True)
     family_sharable: bool = Field(default=False)
     review_note: Optional[str] = Field(default=None, max_length=4000)
-    price_tier: Optional[str] = Field(default=None, min_length=1)
+    price_krw: int = Field(..., ge=0)
+    price_point_id: Optional[str] = Field(default=None)
     base_territory: str = Field(default="KOR", min_length=2)
     localizations: List[AppleLocalization] = Field(default_factory=list)
 
@@ -436,9 +500,10 @@ class AppleUpdateInAppRequest(BaseModel):
     cleared_for_sale: Optional[bool] = None
     family_sharable: Optional[bool] = None
     review_note: Optional[str] = Field(default=None, max_length=4000)
-    price_tier: Optional[str] = Field(default=None, min_length=1)
+    price_krw: Optional[int] = Field(default=None, ge=0)
+    price_point_id: Optional[str] = Field(default=None)
     base_territory: str = Field(default="KOR", min_length=2)
-    localizations: List[AppleLocalization] = Field(default_factory=list)
+    localizations: Dict[str, AppleLocalization] = Field(default_factory=dict)
 
 
 class AppleBulkDeletePreviewRequest(BaseModel):
@@ -487,6 +552,10 @@ class AppleBulkDeleteApplyRequest(BaseModel):
     items: List[AppleBulkDeleteItem] = Field(..., min_length=1)
 
 
+class AppleProtectionRequest(BaseModel):
+    product_ids: List[str] = Field(..., min_length=1)
+
+
 class AppleImportPayload(BaseModel):
     product_id: str = Field(..., min_length=1)
     reference_name: str = Field(..., min_length=1)
@@ -501,7 +570,7 @@ class AppleImportPayload(BaseModel):
     cleared_for_sale: bool = Field(default=True)
     family_sharable: bool = Field(default=False)
     review_note: Optional[str] = Field(default=None, max_length=4000)
-    price_tier: Optional[str] = Field(default=None, min_length=1)
+    price_krw: Optional[int] = Field(default=None, ge=0)
     base_territory: str = Field(default="KOR", min_length=2)
     localizations: List[AppleLocalization] = Field(default_factory=list)
 
@@ -520,78 +589,402 @@ def _collect_languages_from_products(products: Iterable[Dict[str, Any]]) -> List
     languages: set[str] = set()
     for item in products:
         listings = item.get("listings") or {}
-        for language in listings.keys():
-            if isinstance(language, str):
-                languages.add(language)
+        if isinstance(listings, dict):
+            for language in listings.keys():
+                if isinstance(language, str):
+                    languages.add(language)
+        elif isinstance(listings, list):
+            for entry in listings:
+                if not isinstance(entry, dict):
+                    continue
+                language = entry.get("languageCode") or entry.get("language")
+                if isinstance(language, str):
+                    languages.add(language)
     return sorted(languages)
 
 
-def _canonicalize_google_product(item: Dict[str, Any]) -> Dict[str, Any]:
-    listings = item.get("listings") or {}
+def _collect_billable_regions_from_products(
+    products: Iterable[Dict[str, Any]]
+) -> Set[str]:
+    regions: Set[str] = set()
+    for item in products:
+        if not isinstance(item, dict):
+            continue
+        canonical = (
+            item
+            if "product_type" in item and isinstance(item.get("prices"), (dict, type(None)))
+            else _canonicalize_google_product(item)
+        )
+        if not isinstance(canonical, dict):
+            continue
+        price_map = canonical.get("prices")
+        if isinstance(price_map, dict):
+            for region_code, payload in price_map.items():
+                if not isinstance(region_code, str):
+                    continue
+                if isinstance(payload, dict):
+                    price_micros = payload.get("priceMicros")
+                    currency = payload.get("currency")
+                    if price_micros and currency:
+                        regions.add(region_code.strip().upper())
+    return regions
+
+
+def _extract_billable_regions_from_product(product: Dict[str, Any]) -> Set[str]:
+    if not isinstance(product, dict):
+        return set()
+    canonical = (
+        product
+        if "product_type" in product and isinstance(product.get("prices"), dict)
+        else _canonicalize_google_product(product)
+    )
+    if not isinstance(canonical, dict):
+        return set()
+    price_map = canonical.get("prices")
+    if not isinstance(price_map, dict):
+        return set()
+    regions: Set[str] = set()
+    for region_code, payload in price_map.items():
+        if not isinstance(region_code, str):
+            continue
+        if isinstance(payload, dict):
+            price_micros = payload.get("priceMicros")
+            currency = payload.get("currency")
+            if price_micros and currency:
+                regions.add(region_code.strip().upper())
+    return regions
+
+
+def _paginate_cached_products(
+    products: List[Dict[str, Any]], token: Optional[str], page_size: int
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    if page_size <= 0:
+        raise ValueError("페이지 크기는 1 이상이어야 합니다.")
+    if page_size > MAX_PAGE_SIZE:
+        page_size = MAX_PAGE_SIZE
+
+    offset = 0
+    if token:
+        if not token.startswith("offset:"):
+            raise ValueError("잘못된 페이지 토큰입니다.")
+        try:
+            offset = int(token.split(":", 1)[1])
+        except ValueError as exc:
+            raise ValueError("잘못된 페이지 토큰입니다.") from exc
+        if offset < 0:
+            offset = 0
+
+    page = products[offset : offset + page_size]
+    next_offset = offset + page_size
+    next_token = f"offset:{next_offset}" if next_offset < len(products) else None
+    return page, next_token
+
+
+def _canonicalize_google_product(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    source = item.get("__source") or ""
+    product_type = {
+        "monetization_onetime": "onetime",
+        "monetization_subscription": "subscription",
+    }.get(source, "unknown")
+
+    def _resolve_sku() -> str:
+        candidates = [
+            item.get("sku"),
+            item.get("productId"),
+            item.get("oneTimeProductId"),
+            item.get("subscriptionId"),
+        ]
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        name = item.get("name")
+        if isinstance(name, str) and name:
+            last_segment = name.split("/")[-1]
+            if last_segment:
+                return last_segment
+        return ""
+
+    def _iter_listings():
+        listings_obj = item.get("listings")
+        if isinstance(listings_obj, dict) and listings_obj:
+            for language, payload in listings_obj.items():
+                yield language, payload
+            return
+        if isinstance(listings_obj, list) and listings_obj:
+            for entry in listings_obj:
+                if not isinstance(entry, dict):
+                    continue
+                language = entry.get("languageCode") or entry.get("language")
+                if not isinstance(language, str) or not language:
+                    continue
+                yield language, entry
+
+        localized_resources = item.get("localizedResources") or item.get("localized_resources")
+        if isinstance(localized_resources, list):
+            for payload in localized_resources:
+                if not isinstance(payload, dict):
+                    continue
+                language = payload.get("languageCode") or payload.get("language")
+                if not isinstance(language, str) or not language:
+                    continue
+                yield language, {
+                    "title": payload.get("title") or payload.get("name"),
+                    "description": payload.get("description") or payload.get("shortDescription"),
+                }
+
+    first_listing_language: Optional[str] = None
     normalized_listings: Dict[str, Dict[str, str]] = {}
-    for language, listing in listings.items():
+    for language, listing in _iter_listings() or []:
         if not isinstance(language, str) or not isinstance(listing, dict):
             continue
-        title = (listing.get("title") or "").strip()
-        description = (listing.get("description") or "").strip()
+        title = (listing.get("title") or listing.get("name") or "").strip()
+        description = (listing.get("description") or listing.get("shortDescription") or "").strip()
         if not title and not description:
             continue
+        if not first_listing_language:
+            first_listing_language = language
         normalized_listings[language] = {
             "title": title or "",
             "description": description or "",
         }
 
-    default_price = item.get("defaultPrice") or {}
-    prices = item.get("prices") or {}
+    def _normalize_price_entry(price_obj: Any) -> Optional[Dict[str, str]]:
+        if not isinstance(price_obj, dict):
+            return None
+
+        if "priceMicros" in price_obj and "currency" in price_obj:
+            price_micros = price_obj.get("priceMicros")
+            currency = price_obj.get("currency")
+            return {
+                "priceMicros": str(price_micros or ""),
+                "currency": currency or "",
+            }
+
+        money = price_obj.get("price") if isinstance(price_obj.get("price"), dict) else price_obj
+        if not isinstance(money, dict):
+            return None
+        currency_code = money.get("currencyCode")
+        if not currency_code:
+            return None
+        units = money.get("units", "0")
+        nanos = money.get("nanos", 0)
+        try:
+            units_int = int(str(units))
+            nanos_int = int(str(nanos))
+        except ValueError:
+            logger.debug("Failed to parse money value: %s", money)
+            return None
+        price_micros = units_int * 1_000_000 + nanos_int // 1_000
+        return {"priceMicros": str(price_micros), "currency": currency_code}
+
+    price_map: Dict[str, Dict[str, str]] = {}
+
+    direct_prices = item.get("prices")
+    if isinstance(direct_prices, dict):
+        for region, payload in direct_prices.items():
+            if isinstance(payload, dict) and "regionCode" in payload and "price" in payload:
+                region_code = payload.get("regionCode")
+                normalized = _normalize_price_entry(payload.get("price"))
+            else:
+                region_code = region
+                normalized = _normalize_price_entry(payload)
+            if isinstance(region_code, str) and normalized:
+                price_map[region_code] = normalized
+
+    for config in item.get("regionalConfigs", []) or []:
+        if not isinstance(config, dict):
+            continue
+        region_code = config.get("regionCode")
+        price_candidate: Any = config.get("price") or config.get("newestPrice") or config.get("oldestPrice")
+        if isinstance(price_candidate, dict) and "price" in price_candidate:
+            price_candidate = price_candidate.get("price")
+        normalized = _normalize_price_entry(price_candidate)
+        if isinstance(region_code, str) and normalized:
+            price_map.setdefault(region_code, normalized)
+
+    purchase_options = item.get("purchaseOptions")
+    status: str = (item.get("status") or item.get("state") or "").strip()
+    selected_purchase_option: Optional[Dict[str, Any]] = None
+    if isinstance(purchase_options, list):
+        for option in purchase_options:
+            if not isinstance(option, dict):
+                continue
+            option_state = option.get("state")
+            if option_state:
+                status = str(option_state).strip()
+            if selected_purchase_option is None:
+                selected_purchase_option = option
+            elif str(option.get("state", "")).strip().upper() == "ACTIVE" and str(
+                selected_purchase_option.get("state", "")
+            ).strip().upper() != "ACTIVE":
+                selected_purchase_option = option
+            configs = option.get("regionalPricingAndAvailabilityConfigs")
+            if isinstance(configs, list):
+                for config in configs:
+                    if not isinstance(config, dict):
+                        continue
+                    availability = config.get("availability")
+                    if isinstance(availability, str) and availability.upper() not in ("AVAILABLE", "AVAILABILITY_UNSPECIFIED"):
+                        continue
+                    region_code = config.get("regionCode")
+                    normalized = _normalize_price_entry(config.get("price"))
+                    if isinstance(region_code, str) and normalized:
+                        price_map.setdefault(region_code, normalized)
+
+    for base_plan in item.get("basePlans", []) or []:
+        if not isinstance(base_plan, dict):
+            continue
+        plan_state = base_plan.get("state")
+        if plan_state:
+            status = plan_state.lower()
+        regional_prices = (
+            base_plan.get("regionalPrices")
+            or base_plan.get("prices")
+            or base_plan.get("regional_configs")
+        )
+        if isinstance(regional_prices, dict):
+            for region, payload in regional_prices.items():
+                if isinstance(payload, dict) and "regionCode" in payload and "price" in payload:
+                    region_code = payload.get("regionCode")
+                    normalized = _normalize_price_entry(payload.get("price"))
+                else:
+                    region_code = region
+                    normalized = _normalize_price_entry(payload)
+                if isinstance(region_code, str) and normalized:
+                    price_map.setdefault(region_code, normalized)
+        elif isinstance(regional_prices, list):
+            for payload in regional_prices:
+                if not isinstance(payload, dict):
+                    continue
+                region_code = payload.get("regionCode") or payload.get("region")
+                price_candidate: Any = payload.get("price") or payload.get("priceAmount") or payload
+                if isinstance(price_candidate, dict) and "price" in price_candidate:
+                    price_candidate = price_candidate.get("price")
+                normalized = _normalize_price_entry(price_candidate)
+                if isinstance(region_code, str) and normalized:
+                    price_map.setdefault(region_code, normalized)
+
+    default_price_raw = item.get("defaultPrice")
+    normalized_default_price = _normalize_price_entry(default_price_raw) if default_price_raw else None
+
+    if not normalized_default_price and price_map:
+        preferred_region = item.get("defaultRegionCode") or "KR"
+        if isinstance(preferred_region, str) and preferred_region in price_map:
+            normalized_default_price = dict(price_map[preferred_region])
+        else:
+            first_region = next(iter(price_map.values()))
+            normalized_default_price = dict(first_region)
+
     normalized_prices: Dict[str, Dict[str, str]] = {}
-    for region, price in prices.items():
-        if not isinstance(region, str) or not isinstance(price, dict):
-            continue
-        price_micros = price.get("priceMicros")
-        currency = price.get("currency")
-        if price_micros is None and currency is None:
-            continue
+    for region, price in price_map.items():
         normalized_prices[region] = {
-            "priceMicros": str(price_micros or ""),
-            "currency": currency or "",
+            "priceMicros": price.get("priceMicros", ""),
+            "currency": price.get("currency", ""),
         }
 
+    default_language = (
+        item.get("defaultLanguage")
+        or item.get("defaultLanguageCode")
+        or item.get("defaultLanguageTag")
+        or first_listing_language
+        or ""
+    )
+
+    sku = _resolve_sku()
+    if not sku:
+        logger.debug("Skipping Google Play product without identifiable SKU: %s", item.get("name"))
+        return None
+
+    def _normalize_status(raw_status: str) -> str:
+        value = (raw_status or "").strip().upper()
+        if value in {"ACTIVE", "ON_SALE", "AVAILABLE"}:
+            return "active"
+        if value in {"INACTIVE", "STOPPED", "ARCHIVED", "DISABLED"}:
+            return "inactive"
+        if value in {"DRAFT", "PENDING"}:
+            return "draft"
+        return value.lower() if value else "unknown"
+
+    def _extract_numeric_price(price_obj: Optional[Dict[str, str]]) -> Tuple[Optional[int], Optional[str]]:
+        if not isinstance(price_obj, dict):
+            return (None, None)
+        price_micros = price_obj.get("priceMicros")
+        currency = price_obj.get("currency")
+        if price_micros is None or currency is None:
+            return (None, None)
+        try:
+            return (int(price_micros), str(currency))
+        except (TypeError, ValueError):
+            return (None, None)
+
+    default_price_micros, default_price_currency = _extract_numeric_price(normalized_default_price)
+
+    available_regions = {
+        region
+        for region, price in price_map.items()
+        if price.get("currency") and price.get("priceMicros")
+    }
+
+    should_skip = False
+    if default_price_micros is None or default_price_currency is None:
+        should_skip = True
+    if normalized_prices and not available_regions:
+        should_skip = True
+
+    if should_skip:
+        logger.info(
+            "Skipping Google Play product '%s' without usable price information (likely loyalty/promotional item)",
+            sku,
+        )
+        return None
+
+    normalized_default_price = {
+        "priceMicros": str(default_price_micros),
+        "currency": default_price_currency,
+    }
+
     return {
-        "sku": item.get("sku", ""),
-        "status": item.get("status", ""),
-        "default_language": item.get("defaultLanguage", ""),
-        "default_price": {
-            "priceMicros": str(default_price.get("priceMicros") or ""),
-            "currency": default_price.get("currency") or "",
-        },
+        "sku": sku,
+        "status": _normalize_status(status),
+        "default_language": default_language,
+        "default_price": normalized_default_price,
         "listings": normalized_listings,
         "prices": normalized_prices or None,
+        "product_type": product_type,
+        "__source": source,
+        "purchase_option_id": (selected_purchase_option or {}).get("purchaseOptionId"),
     }
 
 
 def _fetch_google_products() -> List[Dict[str, Any]]:
-    return get_all_inapp_products()
+    raw_products = get_all_google_play_products()
+    filtered: List[Dict[str, Any]] = []
+    skipped = 0
+    for product in raw_products:
+        canonical = _canonicalize_google_product(product)
+        if not canonical:
+            skipped += 1
+            continue
+        filtered.append(product)
+    if skipped:
+        logger.info("Filtered out %d Google Play promotional products without price", skipped)
+    return filtered
 
 
 def _fetch_apple_products() -> List[Dict[str, Any]]:
-    products, _ = get_all_inapp_purchases(include_relationships=True)
-    for item in products:
-        if not isinstance(item, dict):
-            continue
-        localizations = item.get("localizations")
-        if isinstance(localizations, dict):
-            simplified: Dict[str, Dict[str, str]] = {}
-            for locale, payload in localizations.items():
-                if not isinstance(locale, str) or not locale:
-                    continue
-                if isinstance(payload, dict):
-                    name = str(payload.get("name") or "")
-                    description = str(payload.get("description") or "")
-                else:
-                    name = ""
-                    description = ""
-                simplified[locale] = {"name": name, "description": description}
-            item["localizations"] = simplified
+    # Apply debug mode limit at fetch time to avoid fetching too many items
+    max_items = APPLE_DEBUG_MAX_ITEMS if APPLE_DEBUG_MODE else None
+    if max_items:
+        logger.info(
+            f"Apple debug mode enabled: limiting fetch to {max_items} items"
+        )
+    
+    products, _ = get_all_inapp_purchases(
+        include_relationships=True,
+        max_items=max_items,
+        summary_only=True,
+    )
+
     return products
 
 
@@ -658,33 +1051,14 @@ def _to_apple_summary(product: Dict[str, Any]) -> Dict[str, Any]:
         "referenceName": product.get("referenceName"),
         "type": product.get("type"),
         "state": product.get("state"),
-        "clearedForSale": product.get("clearedForSale"),
-        "familySharable": product.get("familySharable"),
     }
-    prices = product.get("prices")
-    if isinstance(prices, list):
-        summary["prices"] = prices
+
+    krw_price = product.get("krwPrice")
+    if krw_price:
+        summary["krwPrice"] = krw_price
     price_tier = product.get("priceTier")
-    if price_tier and "prices" not in summary:
-        summary["prices"] = [{"priceTier": price_tier}]
-    localizations = product.get("localizations")
-    if isinstance(localizations, dict):
-        simplified_localizations: Dict[str, Dict[str, str]] = {}
-        for locale, payload in localizations.items():
-            if not isinstance(locale, str) or not locale:
-                continue
-            if isinstance(payload, dict):
-                name = str(payload.get("name") or "")
-                description = str(payload.get("description") or "")
-            else:
-                name = ""
-                description = ""
-            simplified_localizations[locale] = {
-                "name": name,
-                "description": description,
-            }
-        if simplified_localizations:
-            summary["localizations"] = simplified_localizations
+    if price_tier:
+        summary["priceTier"] = price_tier
     return summary
 
 
@@ -903,6 +1277,15 @@ def _parse_import_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
 def _parse_apple_import_csv(
     content: bytes, attachments: Dict[str, Dict[str, Any]] | None = None
 ) -> tuple[List[Dict[str, Any]], List[str]]:
+    """Parse Apple IAP import CSV.
+    
+    Expected CSV format:
+    - productId: 상품 ID (필수)
+    - type: 타입 (필수)
+    - price_krw: KRW 가격 (정수, 필수)
+    - name_{locale}: 각 로케일별 제목 (APPLE_LOCALIZATION_LOCALES 기준)
+    - description_{locale}: 각 로케일별 설명 (APPLE_LOCALIZATION_LOCALES 기준)
+    """
     try:
         decoded = content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:
@@ -912,24 +1295,51 @@ def _parse_apple_import_csv(
     if not reader.fieldnames:
         raise HTTPException(status_code=400, detail="CSV 헤더를 찾을 수 없습니다.")
 
-    locales: set[str] = set()
+    # Use APPLE_LOCALIZATION_LOCALES as the expected locales
+    expected_locales = APPLE_LOCALIZATION_LOCALES
+    
+    # Also collect any additional locales found in CSV (for backward compatibility)
+    found_locales: set[str] = set()
     for name in reader.fieldnames:
         if name.startswith("name_"):
-            locales.add(name.split("_", 1)[1])
+            found_locales.add(name.split("_", 1)[1])
         if name.startswith("description_"):
-            locales.add(name.split("_", 1)[1])
+            found_locales.add(name.split("_", 1)[1])
         if name.startswith("screenshot_"):
-            locales.add(name.split("_", 1)[1])
+            found_locales.add(name.split("_", 1)[1])
+    
+    # Use expected locales, but also include any found locales
+    locales = sorted(set(expected_locales) | found_locales)
 
     rows: List[Dict[str, Any]] = []
     for index, row in enumerate(reader, start=2):
         normalized = {key.strip(): (value or "").strip() for key, value in (row or {}).items()}
         normalized["__row"] = str(index)
+        
+        # Validate required fields
+        product_id = normalized.get("productId") or normalized.get("product_id") or ""
+        product_type = normalized.get("type") or ""
+        price_krw = normalized.get("price_krw") or ""
+        
+        if not product_id:
+            raise HTTPException(status_code=400, detail=f"행 {index}: productId가 필요합니다.")
+        if not product_type:
+            raise HTTPException(status_code=400, detail=f"행 {index}: type이 필요합니다.")
+        if not price_krw:
+            raise HTTPException(status_code=400, detail=f"행 {index}: price_krw가 필요합니다.")
+        
+        # Normalize field names
+        if "product_id" in normalized and "productId" not in normalized:
+            normalized["productId"] = normalized["product_id"]
+        
+        # Handle screenshots (optional)
         screenshots: Dict[str, Dict[str, Any]] = {}
         for locale in locales:
             key = f"screenshot_{locale}"
             screenshot_value = normalized.get(key, "")
             if not screenshot_value:
+                continue
+            if not attachments:
                 continue
             attachment = _resolve_attachment(screenshot_value, attachments)
             data_bytes = attachment["data"]
@@ -954,7 +1364,7 @@ def _parse_apple_import_csv(
             normalized["__screenshots"] = screenshots
         rows.append(normalized)
 
-    return rows, sorted(locale for locale in locales if locale)
+    return rows, locales
 
 
 def _parse_apple_batch_create_csv(content: bytes) -> tuple[List[Dict[str, Any]], List[str]]:
@@ -1169,7 +1579,11 @@ def _build_import_operations(
 
             price_won_value = entry["price_won"]
             if not price_won_value:
-                raise HTTPException(status_code=400, detail=f"{sku} 행: price_won 값을 입력해주세요.")
+                logger.info(
+                    "Skipping Google Play CSV row for '%s' because price is empty and product is not currently registered.",
+                    sku,
+                )
+                continue
             try:
                 price_micros, _ = _normalize_price_won(price_won_value)
             except ValueError as exc:
@@ -1336,14 +1750,42 @@ def _apple_row_to_payload(
             )
         )
 
+    # Parse price_krw
+    price_krw = None
+    price_krw_str = (row.get("price_krw") or "").strip()
+    if price_krw_str:
+        try:
+            price_krw = int(price_krw_str)
+            if price_krw < 0:
+                raise ValueError("price_krw must be non-negative")
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail=f"행 {row.get('__row')}: price_krw 값이 올바르지 않습니다: {price_krw_str}",
+            )
+    
+    # Get product_id (support both productId and product_id)
+    product_id = (row.get("productId") or row.get("product_id") or "").strip()
+    if not product_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"행 {row.get('__row')}: productId가 필요합니다.",
+        )
+    
+    # Get type (required for creation)
+    purchase_type = (row.get("type") or row.get("purchase_type") or "").strip() or None
+    
+    # Generate reference_name from product_id if not provided
+    reference_name = (row.get("reference_name") or row.get("referenceName") or product_id).strip()
+    
     payload = AppleImportPayload(
-        product_id=(row.get("product_id") or "").strip(),
-        reference_name=(row.get("reference_name") or "").strip(),
-        purchase_type=(row.get("purchase_type") or "").strip() or None,
+        product_id=product_id,
+        reference_name=reference_name,
+        purchase_type=purchase_type,
         cleared_for_sale=cleared_for_sale,
         family_sharable=family_sharable,
         review_note=(row.get("review_note") or "").strip() or None,
-        price_tier=(row.get("price_tier") or "").strip() or None,
+        price_krw=price_krw,
         base_territory=base_territory,
         localizations=localizations,
     )
@@ -1429,12 +1871,16 @@ async def api_list_inapp(
     try:
         if refresh:
             refresh_products_from_remote(GOOGLE_STORE, _fetch_google_products)
-        items, next_token = get_paginated_products(
-            GOOGLE_STORE,
-            _fetch_google_products,
-            token,
-            page_size=page_size,
-        )
+
+        cached_products = get_cached_products_only(GOOGLE_STORE)
+        if not cached_products:
+            if refresh:
+                logger.info("Google Play cache is empty after refresh; returning empty list.")
+            else:
+                logger.debug("Google Play cache empty; returning empty list without remote fetch.")
+            return {"items": [], "nextPageToken": None}
+
+        items, next_token = _paginate_cached_products(cached_products, token, page_size)
         return {"items": items, "nextPageToken": next_token}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1450,7 +1896,7 @@ async def api_export_inapp() -> StreamingResponse:
         products = refresh_products_from_remote(GOOGLE_STORE, _fetch_google_products)
         languages = _collect_languages_from_products(products)
         output = io.StringIO()
-        fieldnames = ["sku", "status", "default_language", "price_won"]
+        fieldnames = ["sku", "status", "default_language", "price_won", "purchase_option_id"]
         for language in languages:
             fieldnames.append(f"title_{language}")
             fieldnames.append(f"description_{language}")
@@ -1458,6 +1904,8 @@ async def api_export_inapp() -> StreamingResponse:
         writer.writeheader()
         for item in products:
             canonical = _canonicalize_google_product(item)
+            if not canonical:
+                continue
             default_price = canonical.get("default_price") or {}
             default_price_micros = default_price.get("priceMicros") or ""
             default_currency = default_price.get("currency") or ""
@@ -1468,6 +1916,7 @@ async def api_export_inapp() -> StreamingResponse:
                 "price_won": _format_price_won_from_micros(default_price_micros, default_currency)
                 if default_price_micros
                 else "",
+                "purchase_option_id": canonical.get("purchase_option_id") or "",
             }
             listings = canonical.get("listings") or {}
             for language in languages:
@@ -1501,7 +1950,7 @@ async def api_bulk_create_template(
     if not languages:
         languages = ["ko-KR"]
 
-    fieldnames = ["index", "sku", "status", "default_language", "price_won"]
+    fieldnames = ["index", "sku", "status", "default_language", "price_won", "purchase_option_id"]
     for language in languages:
         fieldnames.append(f"title_{language}")
         fieldnames.append(f"description_{language}")
@@ -1541,11 +1990,14 @@ async def api_bulk_create_preview(file: UploadFile = File(...)):
         existing_products_raw = refresh_products_from_remote(
             GOOGLE_STORE, _fetch_google_products
         )
-        existing_products = {
-            item.get("sku"): _canonicalize_google_product(item)
-            for item in existing_products_raw
-            if item.get("sku")
-        }
+        existing_products: Dict[str, Dict[str, Any]] = {}
+        for raw in existing_products_raw:
+            canonical = _canonicalize_google_product(raw)
+            if not canonical:
+                continue
+            sku = canonical.get("sku")
+            if sku:
+                existing_products[sku] = canonical
         templates = generate_price_templates_from_products(existing_products_raw)
         templates_by_price = index_templates_by_price_micros(templates)
     except Exception as exc:
@@ -1566,6 +2018,15 @@ async def api_bulk_create_preview(file: UploadFile = File(...)):
 @app.post("/api/google/inapp/create")
 async def api_create_inapp(payload: CreateInAppRequest):
     try:
+        allowed_regions: Optional[Set[str]] = None
+        try:
+            cached_products_only = get_cached_products_only(GOOGLE_STORE)
+            allowed = _collect_billable_regions_from_products(cached_products_only)
+            if allowed:
+                allowed_regions = allowed
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to collect billable regions from cache: %s", exc)
+
         regional_pricing = None
         if payload.price_template_id:
             products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
@@ -1574,12 +2035,13 @@ async def api_create_inapp(payload: CreateInAppRequest):
             if not template:
                 raise HTTPException(status_code=400, detail="유효하지 않은 가격 템플릿입니다.")
             regional_pricing = template.to_pricing_payload()
-        created = create_managed_inapp(
+        created = create_onetime_product(
             sku=payload.sku,
             default_language=payload.default_language,
             price_won=payload.price_won,
             regional_pricing=regional_pricing,
             translations=[t.dict() for t in payload.translations],
+            allowed_regions=allowed_regions,
         )
         upsert_cached_product(GOOGLE_STORE, created)
         return created
@@ -1599,6 +2061,10 @@ async def api_bulk_create_apply(request: BulkCreateApplyRequest):
     try:
         existing_products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
         existing_skus = {item.get("sku") for item in existing_products if item.get("sku")}
+        initial_allowed_regions = _collect_billable_regions_from_products(existing_products)
+        session_allowed_regions: Optional[Set[str]] = (
+            set(initial_allowed_regions) if initial_allowed_regions else None
+        )
 
         for idx, op in enumerate(request.operations, start=1):
             try:
@@ -1606,20 +2072,61 @@ async def api_bulk_create_apply(request: BulkCreateApplyRequest):
                 if data.sku in existing_skus:
                     raise HTTPException(status_code=400, detail=f"{data.sku} 는 이미 등록된 상품입니다.")
 
+                default_price = data.default_price
+                try:
+                    price_micros = int(default_price.priceMicros)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{data.sku} 행: priceMicros 값이 올바르지 않습니다.",
+                    )
+                currency = (default_price.currency or "").upper()
+                if currency != "KRW":
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{data.sku} 행: 기본 통화는 KRW여야 합니다. (현재: {currency or '미지정'})",
+                    )
+                price_won = price_micros // 1_000_000
+                if price_won <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{data.sku} 행: priceMicros 값이 유효하지 않습니다.",
+                    )
+
                 translations = [
                     {"language": language, "title": listing.title, "description": listing.description}
                     for language, listing in data.listings.items()
+                    if listing.title and listing.description
                 ]
-                created = create_managed_inapp(
+
+                regional_pricing: Optional[Dict[str, Any]] = None
+                if data.prices:
+                    converted_prices: Dict[str, Dict[str, str]] = {}
+                    for region, price in data.prices.items():
+                        if not isinstance(price, PricePayload):
+                            continue
+                        if not price.priceMicros or not price.currency:
+                            continue
+                        converted_prices[region] = {
+                            "priceMicros": price.priceMicros,
+                            "currency": price.currency,
+                        }
+                    if converted_prices:
+                        regional_pricing = {"prices": converted_prices}
+
+                created = create_onetime_product(
                     sku=data.sku,
                     default_language=data.default_language,
+                    price_won=price_won,
+                    regional_pricing=regional_pricing,
                     translations=translations,
-                    default_price=data.default_price.model_dump(),
-                    prices=data.prices,
-                    status=data.status,
+                    allowed_regions=session_allowed_regions,
                 )
                 upsert_cached_product(GOOGLE_STORE, created)
                 existing_skus.add(data.sku)
+                created_regions = _extract_billable_regions_from_product(created)
+                if created_regions:
+                    session_allowed_regions = created_regions
                 results["create"] += 1
             except HTTPException:
                 # Re-raise HTTP exceptions (like duplicate SKU)
@@ -1711,11 +2218,14 @@ async def api_import_preview(file: UploadFile = File(...)):
         existing_products_raw = refresh_products_from_remote(
             GOOGLE_STORE, _fetch_google_products
         )
-        existing_products = {
-            item.get("sku"): _canonicalize_google_product(item)
-            for item in existing_products_raw
-            if item.get("sku")
-        }
+        existing_products: Dict[str, Dict[str, Any]] = {}
+        for raw in existing_products_raw:
+            canonical = _canonicalize_google_product(raw)
+            if not canonical:
+                continue
+            sku = canonical.get("sku")
+            if sku:
+                existing_products[sku] = canonical
         templates = generate_price_templates_from_products(existing_products_raw)
         templates_by_price = index_templates_by_price_micros(templates)
     except Exception as exc:
@@ -1744,25 +2254,73 @@ async def api_import_apply(request: ImportApplyRequest):
     failed_items = []
 
     try:
+        cached_products = get_cached_products(GOOGLE_STORE, _fetch_google_products)
+        initial_allowed_regions = _collect_billable_regions_from_products(cached_products)
+        session_allowed_regions: Optional[Set[str]] = (
+            set(initial_allowed_regions) if initial_allowed_regions else None
+        )
+
         for idx, op in enumerate(request.operations, start=1):
             try:
                 if op.action == "create":
                     if not op.data:
                         raise HTTPException(status_code=400, detail="create 작업에는 data가 필요합니다.")
                     data = op.data
+
+                    default_price = data.default_price
+                    try:
+                        price_micros = int(default_price.priceMicros)
+                    except (TypeError, ValueError):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{data.sku} 행: priceMicros 값이 올바르지 않습니다.",
+                        )
+                    currency = (default_price.currency or "").upper()
+                    if currency != "KRW":
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{data.sku} 행: 기본 통화는 KRW여야 합니다. (현재: {currency or '미지정'})",
+                        )
+                    price_won = price_micros // 1_000_000
+                    if price_won <= 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{data.sku} 행: priceMicros 값이 유효하지 않습니다.",
+                        )
+
                     translations = [
                         {"language": language, "title": listing.title, "description": listing.description}
                         for language, listing in data.listings.items()
+                        if listing.title and listing.description
                     ]
-                    created = create_managed_inapp(
+
+                    regional_pricing: Optional[Dict[str, Any]] = None
+                    if data.prices:
+                        converted_prices: Dict[str, Dict[str, str]] = {}
+                        for region, price in data.prices.items():
+                            if not isinstance(price, PricePayload):
+                                continue
+                            if not price.priceMicros or not price.currency:
+                                continue
+                            converted_prices[region] = {
+                                "priceMicros": price.priceMicros,
+                                "currency": price.currency,
+                            }
+                        if converted_prices:
+                            regional_pricing = {"prices": converted_prices}
+
+                    created = create_onetime_product(
                         sku=data.sku,
                         default_language=data.default_language,
+                        price_won=price_won,
+                        regional_pricing=regional_pricing,
                         translations=translations,
-                        default_price=data.default_price.model_dump(),
-                        prices=data.prices,
-                        status=data.status,
+                        allowed_regions=session_allowed_regions,
                     )
                     upsert_cached_product(GOOGLE_STORE, created)
+                    created_regions = _extract_billable_regions_from_product(created)
+                    if created_regions:
+                        session_allowed_regions = created_regions
                     results["create"] += 1
                 elif op.action == "update":
                     if not op.data:
@@ -1836,84 +2394,200 @@ async def api_apple_config():
     }
 
 
+@app.get("/api/apple/inapp/bulk-create/sample")
+@csv_processing_endpoint
+async def api_apple_bulk_create_sample() -> StreamingResponse:
+    """Generate sample CSV for Apple IAP bulk creation.
+    
+    Returns a CSV with 2 rows based on an existing IAP (if available) with full localization data.
+    """
+    try:
+        # Get existing products
+        products = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
+        
+        # Build CSV header
+        locales = APPLE_LOCALIZATION_LOCALES
+        fields = ['productId', 'type', 'price_krw']
+        for locale in locales:
+            fields.append(f'name_{locale}')
+            fields.append(f'description_{locale}')
+        
+        rows = [','.join(fields)]
+        
+        # Get first product as sample (fetch full detail with localizations)
+        sample_product = None
+        if products:
+            first_product = products[0]
+            product_id = first_product.get('productId') or first_product.get('sku')
+            if product_id:
+                try:
+                    # Fetch full detail with localizations
+                    detail = await _run_in_thread(_find_apple_inapp, product_id)
+                    if detail:
+                        sample_product = detail
+                except Exception as exc:
+                    logger.warning("Failed to fetch sample product detail: %s", exc)
+        
+        # Generate 2 sample rows
+        for row_num in range(2):
+            if sample_product:
+                # Use different product_id for each row (add suffix)
+                base_product_id = str(sample_product.get('productId') or sample_product.get('sku') or 'sample_product')
+                product_id = f'{base_product_id}_sample_{row_num + 1}'
+                product_type = str(sample_product.get('type') or 'consumable')
+                
+                # Get KRW price
+                price_krw = ''
+                krw_price = sample_product.get('krwPrice')
+                if isinstance(krw_price, dict) and krw_price.get('customerPrice'):
+                    try:
+                        price_str = str(krw_price.get('customerPrice', ''))
+                        if price_str:
+                            price_krw = str(int(float(price_str)))
+                    except (ValueError, TypeError):
+                        price_krw = '1000'  # Default sample price
+                else:
+                    price_krw = '1000'  # Default sample price
+                
+                # Get localizations
+                localizations = sample_product.get('localizations') or []
+                localization_map = {loc.get('locale'): loc for loc in localizations if isinstance(loc, dict)}
+            else:
+                # No existing product, use default values
+                product_id = f'sample_product_{row_num + 1}'
+                product_type = 'consumable'
+                price_krw = '1000'
+                localization_map = {}
+            
+            row_data = [product_id, product_type, price_krw]
+            
+            for locale in locales:
+                if sample_product and locale in localization_map:
+                    loc = localization_map[locale]
+                    name = str(loc.get('name') or '').replace('"', '""')
+                    description = str(loc.get('description') or '').replace('"', '""')
+                else:
+                    name = f'Sample Product {row_num + 1}'
+                    description = f'Sample Description {row_num + 1}'
+                row_data.append(f'"{name}"')
+                row_data.append(f'"{description}"')
+            
+            rows.append(','.join(row_data))
+        
+        csv_content = '\n'.join(rows).encode('utf-8-sig')  # UTF-8 with BOM
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        filename = f"apple-iap-bulk-create-sample-{timestamp}.csv"
+        
+        return StreamingResponse(
+            iter([csv_content]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        logger.exception("Failed to generate Apple IAP bulk create sample")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/apple/inapp/import/preview")
 @csv_processing_endpoint
 async def api_apple_import_preview(file: UploadFile = File(...)):
-    """Preview Apple IAP changes from CSV (create, update, delete operations)."""
+    """Preview Apple IAP bulk creation from CSV (create only, no update/delete)."""
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="CSV 파일이 비어 있습니다.")
 
     try:
-        # Parse CSV
-        import csv
-        import io
-        content_str = content.decode('utf-8-sig')
-        reader = csv.DictReader(io.StringIO(content_str))
-        rows = list(reader)
+        # Parse CSV using existing parser
+        rows, locales = await _run_in_thread(_parse_apple_import_csv, content, None)
         
         if not rows:
             raise HTTPException(status_code=400, detail="CSV 파일에 데이터가 없습니다.")
         
-        # Get existing products
-        existing_products = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
-        existing_product_ids = {item.get("productId") for item in existing_products if item.get("productId")}
+        # Get existing products to check for duplicates
+        existing_products_list = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
+        existing_product_ids = {
+            item.get("productId") 
+            for item in existing_products_list 
+            if item.get("productId")
+        }
         
-        # Collect locales from CSV
-        csv_locales = set()
-        for row in rows:
-            for key in row.keys():
-                if key.startswith('name_') or key.startswith('description_'):
-                    locale = key.split('_', 1)[1]
-                    csv_locales.add(locale)
-        
-        # Build operations
+        # Build operations (create only, skip duplicates)
         operations: List[Dict[str, Any]] = []
-        summary = {"create": 0, "update": 0, "delete": 0}
+        summary = {"create": 0, "duplicate": 0, "invalid": 0}
+        duplicate_items = []
+        invalid_items = []
         
-        for idx, row in enumerate(rows, start=2):  # Start at 2 (header is row 1)
-            product_id = row.get('productId', '').strip()
+        for row in rows:
+            row_number = row.get("__row", "?")
+            product_id = (row.get("productId") or row.get("product_id") or "").strip()
+            
             if not product_id:
+                invalid_items.append({
+                    "row": row_number,
+                    "product_id": "",
+                    "reason": "productId가 필요합니다."
+                })
+                summary["invalid"] += 1
                 continue
             
-            # Check if this is an existing product
-            exists = product_id in existing_product_ids
-            
-            if exists:
-                # Update operation
-                operations.append({
-                    "action": "update",
+            # Check for duplicates
+            if product_id in existing_product_ids:
+                duplicate_items.append({
+                    "row": row_number,
                     "product_id": product_id,
-                    "data": row,
-                    "row": idx
                 })
-                summary["update"] += 1
-            else:
-                # Create operation
+                summary["duplicate"] += 1
+                continue
+            
+            try:
+                payload = _apple_row_to_payload(row, locales)
+                if not payload.reference_name:
+                    invalid_items.append({
+                        "row": row_number,
+                        "product_id": product_id,
+                        "reason": "reference_name이 필요합니다."
+                    })
+                    summary["invalid"] += 1
+                    continue
+                if not payload.localizations:
+                    invalid_items.append({
+                        "row": row_number,
+                        "product_id": product_id,
+                        "reason": "최소 1개의 로컬라이제이션이 필요합니다."
+                    })
+                    summary["invalid"] += 1
+                    continue
+                if payload.purchase_type is None:
+                    invalid_items.append({
+                        "row": row_number,
+                        "product_id": product_id,
+                        "reason": "type이 필요합니다."
+                    })
+                    summary["invalid"] += 1
+                    continue
+                
                 operations.append({
                     "action": "create",
                     "product_id": product_id,
-                    "data": row,
-                    "row": idx
+                    "data": payload.model_dump(),
+                    "row": row_number,
                 })
                 summary["create"] += 1
-        
-        # Check for products that should be deleted (exist but not in CSV)
-        csv_product_ids = {row.get('productId', '').strip() for row in rows}
-        for existing in existing_products:
-            pid = existing.get("productId")
-            if pid and pid not in csv_product_ids:
-                operations.append({
-                    "action": "delete",
-                    "product_id": pid,
-                    "data": existing
+            except HTTPException as exc:
+                invalid_items.append({
+                    "row": row_number,
+                    "product_id": product_id,
+                    "reason": str(exc.detail) if hasattr(exc, 'detail') else str(exc),
                 })
-                summary["delete"] += 1
+                summary["invalid"] += 1
+                continue
         
         return {
-            "locales": sorted(csv_locales),
+            "locales": locales,
             "operations": operations,
             "summary": summary,
+            "duplicate_items": duplicate_items,
+            "invalid_items": invalid_items,
         }
     except HTTPException:
         raise
@@ -1925,55 +2599,102 @@ async def api_apple_import_preview(file: UploadFile = File(...)):
 @app.post("/api/apple/inapp/import/apply")
 @csv_processing_endpoint
 async def api_apple_import_apply(request: Request):
-    """Apply Apple IAP changes from CSV (create, update, delete operations)."""
-    results = {"create": 0, "update": 0, "delete": 0, "failed": 0}
+    """Apply Apple IAP bulk creation from CSV (create only, no update/delete)."""
+    results = {"create": 0, "failed": 0, "duplicate": 0}
+    success_items = []
     failed_items = []
+    duplicate_items = []
     
     try:
         payload = await request.json()
         operations = payload.get("operations", [])
         
+        # Get existing products to check for duplicates
+        existing_products_list = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
+        existing_product_ids = {
+            item.get("productId") 
+            for item in existing_products_list 
+            if item.get("productId")
+        }
+        
         for idx, op in enumerate(operations, start=1):
             try:
                 action = op.get("action")
                 product_id = op.get("product_id")
+                data = op.get("data", {})
                 
-                if action == "create":
-                    # Create new IAP
-                    # Implementation needed
-                    results["create"] += 1
-                elif action == "update":
-                    # Update existing IAP
-                    # Implementation needed
-                    results["update"] += 1
-                elif action == "delete":
-                    # Delete IAP
-                    await _run_in_thread(delete_inapp_purchase, product_id)
-                    results["delete"] += 1
-                else:
+                # Only allow create action
+                if action != "create":
                     failed_items.append({
-                        "row": idx,
+                        "row": op.get("row", idx),
                         "product_id": product_id,
                         "action": action,
-                        "error": f"Unknown action: {action}"
+                        "error": f"지원하지 않는 작업입니다: {action} (신규 등록만 가능합니다)"
                     })
                     results["failed"] += 1
+                    continue
+                
+                # Check for duplicates
+                if product_id in existing_product_ids:
+                    duplicate_items.append({
+                        "row": op.get("row", idx),
+                        "product_id": product_id,
+                    })
+                    results["duplicate"] += 1
+                    continue
+                
+                # Create new IAP
+                def _create_apple_iap() -> Dict[str, Any]:
+                    payload_data = AppleImportPayload(**data)
+                    result = create_apple_inapp_purchase(
+                        product_id=product_id,
+                        reference_name=payload_data.reference_name,
+                        purchase_type=payload_data.purchase_type or "consumable",
+                        cleared_for_sale=payload_data.cleared_for_sale,
+                        family_sharable=payload_data.family_sharable,
+                        review_note=payload_data.review_note,
+                        price_point_id=None,
+                        price_tier=None,
+                        price_krw=payload_data.price_krw,
+                        base_territory=payload_data.base_territory,
+                        localizations=[loc.model_dump() for loc in payload_data.localizations],
+                    )
+                    upsert_cached_product(APPLE_STORE, _to_apple_summary(result))
+                    return result
+                
+                await _run_in_thread(_create_apple_iap)
+                results["create"] += 1
+                success_items.append({
+                    "row": op.get("row", idx),
+                    "product_id": product_id,
+                })
+                # Add to existing set to prevent duplicate creation in same batch
+                existing_product_ids.add(product_id)
+                
+            except HTTPException:
+                raise
             except Exception as exc:
                 failed_items.append({
-                    "row": idx,
+                    "row": op.get("row", idx),
                     "product_id": op.get("product_id", "unknown"),
                     "action": op.get("action", "unknown"),
                     "error": str(exc)
                 })
                 results["failed"] += 1
-                logger.error(f"Failed to process row {idx}: {exc}")
+                logger.error(f"Failed to process row {op.get('row', idx)}: {exc}")
                 continue
         
         response_data = {"status": "ok", "summary": results}
+        if success_items:
+            response_data["success_items"] = success_items
         if failed_items:
             response_data["failed_items"] = failed_items
+        if duplicate_items:
+            response_data["duplicate_items"] = duplicate_items
         
         return response_data
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to apply Apple import operations")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -1982,57 +2703,80 @@ async def api_apple_import_apply(request: Request):
 @app.get("/api/apple/inapp/export")
 @csv_processing_endpoint
 async def api_apple_export() -> StreamingResponse:
-    """Export all Apple IAPs to CSV."""
+    """Export all Apple IAPs to CSV.
+    
+    CSV format:
+    - productId: 상품 ID
+    - type: 타입 (consumable, nonConsumable, etc.)
+    - price_krw: KRW 가격 (정수)
+    - name_{locale}: 각 로케일별 제목 (APPLE_LOCALIZATION_LOCALES 기준)
+    - description_{locale}: 각 로케일별 설명 (APPLE_LOCALIZATION_LOCALES 기준)
+    """
     try:
         # Get all cached IAPs with full relationships
         products = await _run_in_thread(get_cached_products, APPLE_STORE, _fetch_apple_products, False)
         
-        if not products:
-            # Return empty CSV
-            csv_content = b'\xef\xbb\xbfproductId,referenceName\n'  # UTF-8 BOM
-            return StreamingResponse(iter([csv_content]), media_type="text/csv")
-        
-        # Collect all unique locales from products
-        locales = set()
-        for product in products:
-            localizations = product.get("localizations") or {}
-            locales.update(localizations.keys())
-        
-        # Sort locales: KO first, then alphabetical
-        sorted_locales = sorted(locales, key=lambda x: (x != 'ko', x))
-        
         # Build CSV header
-        base_fields = ['productId', 'referenceName', 'type', 'state', 'clearedForSale', 'familySharable']
-        loc_fields = []
-        for loc in sorted_locales:
-            loc_fields.extend([f'name_{loc}', f'description_{loc}'])
+        locales = APPLE_LOCALIZATION_LOCALES
+        fields = ['productId', 'type', 'price_krw']
+        for locale in locales:
+            fields.append(f'name_{locale}')
+            fields.append(f'description_{locale}')
         
-        fields = base_fields + loc_fields + ['priceTier']
-        
-        # Build CSV rows
         rows = [','.join(fields)]
+        
+        if not products:
+            # Return empty CSV with headers
+            csv_content = '\n'.join(rows).encode('utf-8-sig')  # UTF-8 with BOM
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            filename = f"apple-iap-export-{timestamp}.csv"
+            return StreamingResponse(
+                iter([csv_content]),
+                media_type="text/csv",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        
+        # Fetch full details for each product to get localizations
         for product in products:
-            row = [
-                str(product.get('productId', '')),
-                str(product.get('referenceName', '')),
-                str(product.get('type', '')),
-                str(product.get('state', '')),
-                'TRUE' if product.get('clearedForSale') else 'FALSE',
-                'TRUE' if product.get('familySharable') else 'FALSE',
+            product_id = str(product.get('productId') or product.get('sku') or '')
+            if not product_id:
+                continue
+            
+            product_type = str(product.get('type') or '')
+            
+            # Get KRW price
+            price_krw = ''
+            krw_price = product.get('krwPrice')
+            if isinstance(krw_price, dict) and krw_price.get('customerPrice'):
+                try:
+                    # customerPrice는 문자열일 수 있으므로 정수로 변환
+                    price_str = str(krw_price.get('customerPrice', ''))
+                    if price_str:
+                        # 소수점이 있으면 제거하고 정수로 변환
+                        price_krw = str(int(float(price_str)))
+                except (ValueError, TypeError):
+                    pass
+            
+            # Build row data
+            row_data = [
+                product_id,
+                product_type,
+                price_krw,
             ]
             
-            # Add localizations
-            for loc in sorted_locales:
-                loc_data = product.get('localizations', {}).get(loc, {})
-                row.append(f'"{(loc_data.get("name") or "").replace('"', '""')}"')
-                row.append(f'"{(loc_data.get("description") or "").replace('"', '""')}"')
+            # Add localizations for each locale
+            # Try to get localizations from cache or fetch detail if needed
+            localizations = product.get('localizations') or []
+            localization_map = {loc.get('locale'): loc for loc in localizations if isinstance(loc, dict)}
             
-            # Add price tier (get first price)
-            prices = product.get('prices', [])
-            price_tier = prices[0].get('priceTier', '') if prices else ''
-            row.append(str(price_tier))
+            for locale in locales:
+                loc = localization_map.get(locale, {})
+                name = str(loc.get('name') or '').replace('"', '""')
+                description = str(loc.get('description') or '').replace('"', '""')
+                row_data.append(f'"{name}"' if name else '')
+                row_data.append(f'"{description}"' if description else '')
             
-            rows.append(','.join(row))
+            rows.append(','.join(row_data))
         
         csv_content = '\n'.join(rows).encode('utf-8-sig')  # UTF-8 with BOM
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -2057,126 +2801,10 @@ async def api_apple_list_inapp(
     try:
         if refresh:
             try:
-                # Smart refresh: check if data changed before full fetch
-                cached_products = await _run_in_thread(
-                    get_cached_products, APPLE_STORE, _fetch_apple_products, False
+                logger.info("Manual refresh requested - performing full Apple IAP fetch")
+                await _run_in_thread(
+                    refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
                 )
-                
-                if cached_products:
-                    # Check if IAPs have changed
-                    needs_refresh, added_ids, removed_ids = await _run_in_thread(
-                        _check_apple_products_changed, cached_products
-                    )
-
-                    if needs_refresh:
-                        # Perform incremental update if we know what changed
-                        if added_ids is not None and removed_ids is not None:
-                            logger.info("Performing incremental update...")
-
-                            # Remove deleted IAPs from cache
-                            if removed_ids:
-                                for product_id in removed_ids:
-                                    try:
-                                        await _run_in_thread(
-                                            delete_cached_product, APPLE_STORE, product_id
-                                        )
-                                        logger.info("Removed deleted IAP from cache: %s", product_id)
-                                    except Exception as exc:
-                                        logger.warning("Failed to remove IAP %s from cache: %s", product_id, exc)
-
-                            # Fetch only new IAPs in parallel
-                            if added_ids:
-                                logger.info("Fetching %d new IAPs in parallel...", len(added_ids))
-
-                                # Use thread pool for parallel fetching
-                                import concurrent.futures
-                                import time
-
-                                def fetch_and_cache_iap(product_id: str) -> Tuple[bool, str, Optional[str]]:
-                                    """Fetch and cache a single IAP. Returns (success, product_id, error)."""
-                                    try:
-                                        iap_detail = get_apple_inapp_purchase_detail(product_id)
-                                        if isinstance(iap_detail, dict):
-                                            localizations = iap_detail.get("localizations")
-                                            if isinstance(localizations, dict):
-                                                simplified: Dict[str, Dict[str, str]] = {}
-                                                for locale, payload in localizations.items():
-                                                    if not isinstance(locale, str) or not locale:
-                                                        continue
-                                                    if isinstance(payload, dict):
-                                                        name = str(payload.get("name") or "")
-                                                        description = str(payload.get("description") or "")
-                                                    else:
-                                                        name = ""
-                                                        description = ""
-                                                    simplified[locale] = {
-                                                        "name": name,
-                                                        "description": description,
-                                                    }
-                                                iap_detail["localizations"] = simplified
-                                        upsert_cached_product(APPLE_STORE, iap_detail)
-                                        return (True, product_id, None)
-                                    except Exception as exc:
-                                        return (False, product_id, str(exc))
-
-                                # Process in batches to avoid rate limits
-                                added_list = list(added_ids)
-                                batch_size = 30
-                                max_workers = 3
-                                success_count = 0
-                                failed_count = 0
-
-                                for batch_start in range(0, len(added_list), batch_size):
-                                    batch_end = min(batch_start + batch_size, len(added_list))
-                                    batch = added_list[batch_start:batch_end]
-                                    remaining = len(added_list) - batch_end
-
-                                    logger.info(
-                                        "Processing batch %d-%d of %d new IAPs (%d remaining)",
-                                        batch_start + 1, batch_end, len(added_list), remaining
-                                    )
-
-                                    # Fetch batch in parallel
-                                    batch_results = await _run_in_thread(
-                                        lambda: list(
-                                            concurrent.futures.ThreadPoolExecutor(max_workers=max_workers).map(
-                                                fetch_and_cache_iap, batch
-                                            )
-                                        )
-                                    )
-
-                                    # Process results
-                                    for success, product_id, error in batch_results:
-                                        if success:
-                                            success_count += 1
-                                            logger.debug("Added new IAP to cache: %s", product_id)
-                                        else:
-                                            failed_count += 1
-                                            logger.warning("Failed to fetch new IAP %s: %s", product_id, error)
-
-                                    # Delay between batches to avoid rate limits
-                                    if batch_end < len(added_list):
-                                        time.sleep(1.0)
-
-                                logger.info(
-                                    "Incremental update complete: %d added, %d failed",
-                                    success_count, failed_count
-                                )
-                        else:
-                            # Unknown changes, do full refresh
-                            logger.info("Changes detected, performing full refresh")
-                            await _run_in_thread(
-                                refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
-                            )
-                    else:
-                        logger.info("No changes detected, using cached data")
-                else:
-                    # No cache, do full fetch
-                    logger.info("No cached data, performing initial fetch")
-                    await _run_in_thread(
-                        refresh_products_from_remote, APPLE_STORE, _fetch_apple_products
-                    )
-                    
             except AppleStoreConfigError as exc:
                 logger.warning(
                     "Failed to refresh Apple products: %s. Continuing with cached data.",
@@ -2356,7 +2984,9 @@ async def api_apple_batch_create_apply(request: Request):
                     cleared_for_sale=False,  # Default to not cleared for sale
                     family_sharable=False,  # Default to not family sharable
                     review_note=None,
+                    price_point_id=data.get("price_point_id"),
                     price_tier=price_tier,
+                    price_krw=data.get("price_krw"),
                     base_territory="KOR",  # Default territory
                     localizations=localizations,
                 )
@@ -2410,7 +3040,9 @@ async def api_apple_create_inapp(payload: AppleCreateInAppRequest):
                 cleared_for_sale=payload.cleared_for_sale,
                 family_sharable=payload.family_sharable,
                 review_note=payload.review_note,
-                price_tier=payload.price_tier,
+                price_point_id=payload.price_point_id,
+                price_tier=None,
+                price_krw=payload.price_krw,
                 base_territory=payload.base_territory,
                 localizations=[loc.model_dump() for loc in payload.localizations],
             )
@@ -2457,7 +3089,17 @@ def _find_apple_inapp(product_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="해당 Apple 인앱 상품을 찾을 수 없습니다.")
 
     try:
-        return get_apple_inapp_purchase_detail(inapp_id)
+        # Fetch detail with localizations (include_relationships=True by default)
+        detail = get_apple_inapp_purchase_detail(inapp_id)
+        
+        # Update cache with summary (including localization info if available)
+        # This ensures that when the user edits the IAP, the localization info is cached
+        if detail:
+            summary = _to_apple_summary(detail)
+            upsert_cached_product(APPLE_STORE, summary)
+            logger.debug("Updated cache for Apple IAP %s with localization info", normalized)
+        
+        return detail
     except AppleStoreConfigError as exc:
         logger.error("Apple Store configuration error: %s", exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -2467,8 +3109,67 @@ def _find_apple_inapp(product_id: str) -> Dict[str, Any]:
 
 
 @app.get("/api/apple/inapp/{product_id}/detail")
-async def api_apple_get_inapp_detail(product_id: str):
-    item = await _run_in_thread(_find_apple_inapp, product_id)
+async def api_apple_get_inapp_detail(product_id: str, skip_price_details: bool = Query(default=False)):
+    """Get Apple IAP detail. If skip_price_details=True, excludes proceeds and priceTier from price info."""
+    def _find_with_price_control() -> Dict[str, Any]:
+        normalized = (product_id or "").strip()
+        if not normalized:
+            raise HTTPException(status_code=404, detail="Apple 인앱 상품을 찾을 수 없습니다.")
+
+        def _lookup(products: Iterable[Dict[str, Any]]) -> Optional[str]:
+            for item in products:
+                if not isinstance(item, dict):
+                    continue
+                candidate = item.get("productId") or item.get("sku")
+                if candidate == normalized:
+                    inapp_id = item.get("id")
+                    if isinstance(inapp_id, str) and inapp_id:
+                        return inapp_id
+            return None
+
+        products = get_cached_products(APPLE_STORE, _fetch_apple_products)
+        inapp_id = _lookup(products)
+        if not inapp_id:
+            products = refresh_products_from_remote(APPLE_STORE, _fetch_apple_products)
+            inapp_id = _lookup(products)
+
+        if not inapp_id:
+            raise HTTPException(status_code=404, detail="해당 Apple 인앱 상품을 찾을 수 없습니다.")
+
+        try:
+            # Fetch detail with localizations (include_relationships=True by default)
+            detail = get_apple_inapp_purchase_detail(inapp_id)
+            
+            # If skip_price_details is True, remove proceeds and priceTier from price info
+            if skip_price_details and detail:
+                krw_price = detail.get("krwPrice")
+                if isinstance(krw_price, dict):
+                    # Create a copy without proceeds and priceTier
+                    filtered_price = {
+                        "currency": krw_price.get("currency"),
+                        "customerPrice": krw_price.get("customerPrice"),
+                    }
+                    detail["krwPrice"] = filtered_price
+                # Also remove priceTier from top level if present
+                if "priceTier" in detail:
+                    detail.pop("priceTier")
+            
+            # Update cache with summary (including localization info if available)
+            # This ensures that when the user edits the IAP, the localization info is cached
+            if detail:
+                summary = _to_apple_summary(detail)
+                upsert_cached_product(APPLE_STORE, summary)
+                logger.debug("Updated cache for Apple IAP %s with localization info", normalized)
+            
+            return detail
+        except AppleStoreConfigError as exc:
+            logger.error("Apple Store configuration error: %s", exc)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Failed to fetch Apple in-app purchase detail")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+    
+    item = await _run_in_thread(_find_with_price_control)
     return {"item": item}
 
 
@@ -2492,7 +3193,9 @@ async def api_apple_update_inapp(product_id: str, payload: AppleUpdateInAppReque
                 cleared_for_sale=payload.cleared_for_sale,
                 family_sharable=payload.family_sharable,
                 review_note=payload.review_note,
-                price_tier=payload.price_tier,
+                price_point_id=payload.price_point_id,
+                price_tier=None,
+                price_krw=payload.price_krw,
                 base_territory=payload.base_territory,
                 localizations=[loc.model_dump() for loc in localizations],
             )
@@ -2620,6 +3323,438 @@ async def api_apple_bulk_delete_apply(request: AppleBulkDeleteApplyRequest):
         raise
 
 
+def _extract_product_key(sku: str) -> Optional[str]:
+    """Extract product key from SKU (e.g., 'aos_dg_1126_99' -> 'dg_1126').
+    
+    Google: aos_dg_xxxx_xxxx -> dg_xxxx
+    iOS: ios_dg_xxxx_xxxx -> dg_xxxx
+    
+    Also handles:
+    - aos_dg_1098_550 -> dg_1098
+    - ios_dg_1098_550 -> dg_1098
+    - aos_dg_1098_550f -> dg_1098
+    """
+    if not sku:
+        return None
+    
+    sku = sku.strip()
+    parts = sku.split('_')
+    
+    # 패턴: [prefix]_dg_[number]_[suffix]
+    # prefix는 'aos' 또는 'ios'일 수 있음
+    # dg 다음의 숫자 부분을 추출
+    if len(parts) >= 3:
+        # parts[0]은 'aos' 또는 'ios'
+        # parts[1]은 'dg'여야 함
+        if parts[1] == 'dg' and len(parts) >= 3:
+            # parts[2]가 숫자인지 확인
+            try:
+                # 숫자 부분 추출 (앞의 0 제거 가능)
+                number_part = parts[2].lstrip('0') or '0'
+                # 'dg_xxxx' 형식으로 반환
+                return f"{parts[1]}_{number_part}"
+            except (ValueError, IndexError):
+                pass
+    
+    # 대소문자 구분 없이 재시도
+    parts_lower = [p.lower() for p in parts]
+    if len(parts_lower) >= 3 and parts_lower[1] == 'dg':
+        try:
+            number_part = parts_lower[2].lstrip('0') or '0'
+            return f"dg_{number_part}"
+        except (ValueError, IndexError):
+            pass
+    
+    return None
+
+
+def _get_protected_apple_ids() -> Set[str]:
+    raw = get_metadata_value(APPLE_PROTECTED_KEY)
+    if not raw:
+        return set()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return {str(item).strip() for item in data if str(item).strip()}
+    except json.JSONDecodeError:
+        logger.warning("Failed to parse protected Apple IAP metadata; resetting.")
+    return set()
+
+
+def _set_protected_apple_ids(ids: Iterable[str]) -> None:
+    cleaned = sorted({str(item).strip() for item in ids if str(item).strip()})
+    set_metadata_value(APPLE_PROTECTED_KEY, json.dumps(cleaned, ensure_ascii=False))
+
+
+def _add_protected_apple_ids(ids: Iterable[str]) -> Set[str]:
+    current = _get_protected_apple_ids()
+    updated = current.union({str(item).strip() for item in ids if str(item).strip()})
+    _set_protected_apple_ids(updated)
+    return updated
+
+
+def _remove_protected_apple_ids(ids: Iterable[str]) -> Set[str]:
+    to_remove = {str(item).strip() for item in ids if str(item).strip()}
+    current = _get_protected_apple_ids()
+    if not current:
+        return current
+    updated = {item for item in current if item not in to_remove}
+    _set_protected_apple_ids(updated)
+    return updated
+
+
+def _find_orphaned_apple_iaps(
+    apple_products: List[Dict[str, Any]], 
+    google_products: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Find Apple IAPs without Google counterparts and Google-only IAPs.
+
+    Matching rules:
+    - Match by product key extracted from SKU/Product ID
+    - Apple: ios_dg_XXXX_YYYY -> key: dg_XXXX
+    - Google: aos_dg_XXXX_YYYY -> key: dg_XXXX
+    - Match if: dg_XXXX parts are the same (e.g., ios_dg_1098_550 matches aos_dg_1098_550)
+    - Also handles cases like ios_dg_1098_550 and aos_dg_1098_550f (same key: dg_1098)
+
+    Returns:
+        (apple_orphaned, google_only)
+    """
+    # Build map of Google products by key
+    google_map: Dict[str, List[Dict[str, Any]]] = {}
+    google_no_key: List[Dict[str, Any]] = []
+    google_total_count = 0
+
+    for product in google_products:
+        google_total_count += 1
+        sku = (product.get("sku") or "").strip()
+        if not sku:
+            google_no_key.append(product)
+            logger.debug("Google Play IAP with no SKU found: %s", product.get("id", "unknown"))
+            continue
+
+        key = _extract_product_key(sku)
+        if key:
+            google_map.setdefault(key, []).append(product)
+            logger.debug("Google Play IAP SKU: %s -> key: %s", sku, key)
+        else:
+            google_no_key.append(product)
+            logger.debug("Google Play IAP SKU doesn't match expected pattern: %s (parts: %s)", sku, sku.split('_') if sku else [])
+
+    # Find Apple IAPs without matching Google IAPs
+    orphaned: List[Dict[str, Any]] = []
+    matched_keys: set[str] = set()
+
+    for product in apple_products:
+        apple_sku = (product.get("productId") or product.get("sku") or "").strip()
+        if not apple_sku:
+            orphaned.append(product)
+            logger.debug("Apple IAP with no SKU/Product ID found: %s", product.get("id", "unknown"))
+            continue
+
+        key = _extract_product_key(apple_sku)
+        if not key:
+            orphaned.append(product)
+            logger.debug("Apple IAP SKU doesn't match expected pattern: %s (parts: %s)", apple_sku, apple_sku.split('_') if apple_sku else [])
+            continue
+
+        if key not in google_map:
+            orphaned.append(product)
+            logger.debug("Apple IAP has no matching Google Play IAP: %s (key: %s, available keys: %s)", 
+                        apple_sku, key, list(google_map.keys())[:10])  # 처음 10개만 로깅
+        else:
+            matched_keys.add(key)
+            logger.debug("Apple IAP has matching Google Play IAP: %s (key: %s)", apple_sku, key)
+
+    # Build Google-only list (canonicalized products)
+    google_only: List[Dict[str, Any]] = []
+
+    # Products that couldn't be keyed
+    for product in google_no_key:
+        canonical = _canonicalize_google_product(product)
+        if canonical:
+            google_only.append(canonical)
+
+    # Products whose key wasn't matched by any Apple IAP
+    unmatched_google_keys = set(google_map.keys()) - matched_keys
+    for key in unmatched_google_keys:
+        products_by_key = google_map[key]
+        for product in products_by_key:
+            canonical = _canonicalize_google_product(product)
+            if canonical:
+                google_only.append(canonical)
+
+    # Log detailed statistics
+    logger.info(
+        "IAP matching results: %d apple-orphaned, %d google-only, %d matched keys (out of %d Apple IAPs, %d Google IAPs)",
+        len(orphaned),
+        len(google_only),
+        len(matched_keys),
+        len(apple_products),
+        google_total_count
+    )
+    logger.debug(
+        "Matching details: Google keys=%d, Matched keys=%d, Unmatched Google keys=%d, Google no-key=%d",
+        len(google_map),
+        len(matched_keys),
+        len(unmatched_google_keys),
+        len(google_no_key)
+    )
+
+    return orphaned, google_only
+
+
+@app.get("/api/apple/inapp/orphaned")
+async def api_apple_orphaned_iaps():
+    """Get list of Apple IAPs that don't have matching Google Play IAPs.
+    
+    Two IAPs are considered matching if their product keys match:
+    - Apple: ios_dg_XXXX_YYYY -> key: dg_XXXX
+    - Google: aos_dg_XXXX_YYYY -> key: dg_XXXX
+    - Match if: dg_XXXX parts are the same (e.g., ios_dg_1098_550 matches aos_dg_1098_550)
+    - Also handles cases like ios_dg_1098_550 and aos_dg_1098_550f (same key: dg_1098)
+    
+    Only returns IAPs that are NOT present in Google Play (orphaned IAPs).
+    """
+    try:
+        # Get all Apple IAPs (from cache, no refresh needed)
+        apple_products = await _run_in_thread(
+            get_cached_products, APPLE_STORE, _fetch_apple_products, False
+        )
+        
+        # Get all Google IAPs - refresh to ensure we have the latest data
+        # This ensures we compare against the current Google Play IAP list
+        google_products = await _run_in_thread(
+            refresh_products_from_remote, GOOGLE_STORE, _fetch_google_products
+        )
+        
+        # Find orphaned Apple IAPs and Google-only IAPs
+        orphaned, google_only = _find_orphaned_apple_iaps(apple_products, google_products)
+        
+        protected_ids = _get_protected_apple_ids()
+        protected_items: List[Dict[str, Any]] = []
+        if protected_ids:
+            product_map = {
+                (item.get("productId") or item.get("sku") or ""): item
+                for item in apple_products
+                if item
+            }
+            for pid in sorted(protected_ids):
+                item = product_map.get(pid)
+                if item:
+                    protected_items.append(item)
+
+        filtered_orphaned = [
+            item
+            for item in orphaned
+            if (item.get("productId") or item.get("sku") or "") not in protected_ids
+        ]
+
+        return {
+            "items": filtered_orphaned,
+            "totalCount": len(filtered_orphaned),
+            "googleOnly": google_only,
+            "protectedItems": protected_items,
+            "protectedIds": sorted(protected_ids),
+        }
+    except Exception as exc:
+        logger.exception("Failed to find orphaned Apple IAPs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/apple/inapp/cleanup")
+async def api_apple_cleanup(request: Request):
+    """Delete or remove from sale selected Apple IAPs that don't have matching Google Play IAPs.
+    
+    Request body should contain:
+    {
+        "productIds": ["ios_dg_1126_99", "ios_dg_1103_1100", ...],
+        "action": "delete" | "remove_from_sale"
+    }
+    
+    action:
+    - "delete": Permanently delete the IAP (cannot be undone, productId cannot be reused)
+    - "remove_from_sale": Set clearedForSale=False (prevents new purchases, maintains access for existing purchasers)
+    """
+    try:
+        payload = await request.json()
+        product_ids = payload.get("productIds", [])
+        action = payload.get("action", "delete")  # Default to delete for backward compatibility
+        
+        if not product_ids:
+            raise HTTPException(status_code=400, detail="처리할 상품 ID가 없습니다.")
+        
+        if action not in ("delete", "remove_from_sale"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"잘못된 action입니다. 'delete' 또는 'remove_from_sale'만 허용됩니다."
+            )
+        
+        # Verify these are actually orphaned (safety check)
+        # Refresh Google Play IAP list to ensure we have the latest data
+        apple_products = await _run_in_thread(
+            get_cached_products, APPLE_STORE, _fetch_apple_products, False
+        )
+        google_products = await _run_in_thread(
+            refresh_products_from_remote, GOOGLE_STORE, _fetch_google_products
+        )
+        
+        orphaned, _ = _find_orphaned_apple_iaps(apple_products, google_products)
+        protected_ids = _get_protected_apple_ids()
+        orphaned_map = {
+            (item.get("productId") or item.get("sku") or "").strip(): item
+            for item in orphaned
+            if item
+            and (item.get("productId") or item.get("sku") or "").strip() not in protected_ids
+        }
+        
+        # Verify all requested IDs are actually orphaned
+        invalid_ids = [pid for pid in product_ids if pid not in orphaned_map]
+        if invalid_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"다음 상품 ID들은 Google Play에 매칭되는 상품이 있습니다: {', '.join(invalid_ids[:5])}"
+            )
+        
+        # Process IAPs
+        results = {"processed": 0, "failed": 0}
+        failed_items: List[Dict[str, Any]] = []
+
+        def _process_iap(product_id: str) -> Tuple[bool, str, Optional[str]]:
+            """Process a single IAP. Returns (success, product_id, error)."""
+            try:
+                # Find the IAP to get the numeric ID (inapp_id)
+                item = orphaned_map.get(product_id)
+                if not item:
+                    return (False, product_id, "IAP를 찾을 수 없습니다.")
+                
+                # Get the numeric ID (inapp_id) - needed for API calls
+                inapp_id = item.get("id") or ""
+                if not inapp_id:
+                    # Try to find it by product_id
+                    try:
+                        detail = _find_apple_inapp(product_id)
+                        inapp_id = detail.get("id") or ""
+                    except Exception:
+                        pass
+                
+                if not inapp_id:
+                    return (False, product_id, "IAP ID를 찾을 수 없습니다.")
+                
+                if action == "delete":
+                    # Delete the IAP
+                    delete_apple_inapp_purchase(inapp_id)
+                    delete_cached_product(APPLE_STORE, product_id)
+                    logger.info("Deleted orphaned Apple IAP: %s (id: %s)", product_id, inapp_id)
+                elif action == "remove_from_sale":
+                    # Remove from sale
+                    updated = remove_apple_inapp_purchase_from_sale(inapp_id)
+                    # Update cache with updated IAP info
+                    summary = _to_apple_summary(updated)
+                    upsert_cached_product(APPLE_STORE, summary)
+                    logger.info("Removed orphaned Apple IAP from sale: %s (id: %s)", product_id, inapp_id)
+                
+                return (True, product_id, None)
+            except Exception as exc:
+                return (False, product_id, str(exc))
+
+        def _process_all() -> Tuple[Dict[str, int], List[Dict[str, Any]], List[str]]:
+            import concurrent.futures
+
+            if not product_ids:
+                return results, failed_items, []
+
+            max_workers = min(5, len(product_ids))  # Limit concurrency to avoid rate limits
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_id = {
+                    executor.submit(_process_iap, product_id): product_id
+                    for product_id in product_ids
+                }
+
+                successful_ids: List[str] = []
+                for future in concurrent.futures.as_completed(future_to_id):
+                    pid = future_to_id[future]
+                    try:
+                        success, product_id, error = future.result()
+                    except Exception as exc:
+                        success, product_id, error = False, pid, str(exc)
+
+                    if success:
+                        results["processed"] += 1
+                        successful_ids.append(product_id)
+                    else:
+                        results["failed"] += 1
+                        failed_items.append({
+                            "productId": product_id,
+                            "error": error or "Unknown error"
+                        })
+                        logger.error("Failed to %s Apple IAP %s: %s", action, product_id, error)
+
+            return results, failed_items, successful_ids
+
+        results, failed_items, successful_ids = await _run_in_thread(_process_all)
+
+        if action == "delete" and successful_ids:
+            _remove_protected_apple_ids(successful_ids)
+
+        response_data = {
+            "status": "ok" if not failed_items else "partial",
+            "summary": results,
+            "action": action
+        }
+        
+        if failed_items:
+            response_data["failed_items"] = failed_items
+        
+        return response_data
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to cleanup orphaned Apple IAPs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.post("/api/apple/inapp/cleanup/protect")
+async def api_apple_cleanup_protect(payload: AppleProtectionRequest):
+    try:
+        product_ids = {pid.strip() for pid in payload.product_ids if pid and pid.strip()}
+        if not product_ids:
+            raise HTTPException(status_code=400, detail="보호할 상품 ID를 입력해주세요.")
+
+        updated = _add_protected_apple_ids(product_ids)
+        logger.info("Protected %d Apple IAPs (total protected: %d)", len(product_ids), len(updated))
+
+        return {
+            "status": "ok",
+            "protectedIds": sorted(updated),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to protect Apple IAPs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/apple/inapp/cleanup/unprotect")
+async def api_apple_cleanup_unprotect(payload: AppleProtectionRequest):
+    try:
+        product_ids = {pid.strip() for pid in payload.product_ids if pid and pid.strip()}
+        if not product_ids:
+            raise HTTPException(status_code=400, detail="보호 해제할 상품 ID를 입력해주세요.")
+
+        updated = _remove_protected_apple_ids(product_ids)
+        logger.info("Unprotected %d Apple IAPs (total protected: %d)", len(product_ids), len(updated))
+
+        return {
+            "status": "ok",
+            "protectedIds": sorted(updated),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to unprotect Apple IAPs")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

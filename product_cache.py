@@ -218,6 +218,12 @@ def get_cached_products(
     return refresh_products_from_remote(store, fetch_remote)
 
 
+def get_cached_products_only(store: str) -> List[Dict[str, Any]]:
+    with _lock:
+        with _get_connection() as conn:
+            return _load_cached_products(conn, store)
+
+
 def get_paginated_products(
     store: str,
     fetch_remote: Callable[[], List[Dict[str, Any]]],
@@ -289,3 +295,35 @@ def get_last_sync_time(store: str) -> Optional[float]:
                 return float(row["value"])
             except (TypeError, ValueError):
                 return None
+
+
+def get_metadata_value(key: str) -> Optional[str]:
+    with _lock:
+        conn = _get_connection()
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (key,)
+            ).fetchone()
+            if not row:
+                return None
+            return row["value"] if isinstance(row, sqlite3.Row) else row[0]
+        finally:
+            conn.close()
+
+
+def set_metadata_value(key: str, value: str) -> None:
+    with _lock:
+        conn = _get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO metadata(key, value)
+                VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (key, value),
+            )
+            conn.commit()
+        finally:
+            conn.close()

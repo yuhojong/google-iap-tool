@@ -534,7 +534,7 @@
                 <button type="button" class="store-toggle-btn is-active" data-store="google" aria-selected="true">Google Play</button>
                 <button type="button" class="store-toggle-btn" data-store="apple" aria-selected="false">Apple App Store</button>
             </div>
-            <nav class="menu is-active" data-store="google" aria-label="Google Play 메뉴">
+            <nav class="menu" data-store="google" aria-label="Google Play 메뉴" hidden>
                 <button type="button" class="menu-button is-active" data-target="section-bulk-management">IAP 벌크 관리</button>
                 <button type="button" class="menu-button" data-target="section-bulk-create">신규 IAP 벌크 등록</button>
                 <button type="button" class="menu-button" data-target="section-single-create">신규 IAP 등록</button>
@@ -542,12 +542,28 @@
             </nav>
             <nav class="menu" data-store="apple" aria-label="Apple App Store 메뉴">
                 <button type="button" class="menu-button is-active" data-target="apple-section-product-list">인앱 상품 목록</button>
+                <button type="button" class="menu-button" data-target="apple-section-bulk-management">IAP 벌크 관리</button>
                 <button type="button" class="menu-button" data-target="apple-section-form">인앱 상품 등록/수정</button>
+                <button type="button" class="menu-button" data-target="apple-section-cleanup">IAP 정리</button>
             </nav>
         </div>
     </header>
     <main>
-        <section class="store-pane" data-store="google">
+        <section id="initial-welcome-screen" class="app-section" style="text-align: center; padding: 4rem 2rem;">
+            <h2 style="font-size: 2.5rem; margin-bottom: 1rem; color: #1a73e8;">IAP Management Tool</h2>
+            <p style="font-size: 1.2rem; color: #666; margin-bottom: 3rem;">관리할 스토어를 선택하세요</p>
+            <div style="display: flex; gap: 2rem; justify-content: center; flex-wrap: wrap;">
+                <button type="button" class="store-select-btn" data-store="google" style="padding: 2rem 4rem; font-size: 1.5rem; border-radius: 12px; border: 2px solid #1a73e8; background: #fff; color: #1a73e8; cursor: pointer; transition: all 0.3s ease; min-width: 250px;">
+                    <div style="font-weight: 700; margin-bottom: 0.5rem;">Google Play</div>
+                    <div style="font-size: 1rem; opacity: 0.8;">Google Play IAP 관리</div>
+                </button>
+                <button type="button" class="store-select-btn" data-store="apple" style="padding: 2rem 4rem; font-size: 1.5rem; border-radius: 12px; border: 2px solid #1a73e8; background: #fff; color: #1a73e8; cursor: pointer; transition: all 0.3s ease; min-width: 250px;">
+                    <div style="font-weight: 700; margin-bottom: 0.5rem;">Apple App Store</div>
+                    <div style="font-size: 1rem; opacity: 0.8;">App Store IAP 관리</div>
+                </button>
+            </div>
+        </section>
+        <section class="store-pane" data-store="google" hidden>
         <section id="section-bulk-management" class="app-section">
             <div>
                 <h2>IAP 벌크 관리</h2>
@@ -749,6 +765,7 @@
                 </div>
                 <div class="csv-actions">
                     <button type="button" id="apple-refresh-btn">목록 새로고침</button>
+                    <button type="button" id="apple-fix-btn">Fix</button>
                 </div>
                 <div id="apple-status" class="status"></div>
                 <div class="initial-loading" id="apple-loading" hidden style="position: relative; z-index: 10; background: white; padding: 10px; margin-bottom: 10px;">
@@ -760,11 +777,9 @@
                         <thead>
                             <tr>
                                 <th scope="col">상품 ID</th>
-                                <th scope="col">참조 이름</th>
                                 <th scope="col">타입</th>
                                 <th scope="col">상태</th>
-                                <th scope="col">가격 티어</th>
-                                <th scope="col">판매 여부</th>
+                                <th scope="col">가격</th>
                                 <th scope="col">작업</th>
                             </tr>
                         </thead>
@@ -798,6 +813,28 @@
                     <div id="apple-bulk-delete-results"></div>
                 </section>
             </section>
+            <section id="apple-section-bulk-management" class="app-section" hidden>
+                <div>
+                    <h2>Apple IAP 벌크 등록</h2>
+                    <p class="hint">신규 IAP를 CSV 파일을 통해 일괄 등록할 수 있습니다. 샘플 CSV를 다운로드하여 형식을 확인한 후 작성하세요.</p>
+                </div>
+                <div class="csv-actions">
+                    <button id="apple-sample-download-btn" type="button">샘플 CSV 다운로드</button>
+                    <form id="apple-import-form">
+                        <input type="file" id="apple-import-file" name="file" accept=".csv" />
+                        <button type="button" id="apple-import-preview-btn">미리보기</button>
+                        <button type="button" id="apple-import-apply-btn" disabled>등록</button>
+                    </form>
+                </div>
+                <div id="apple-import-status" class="status"></div>
+                <div id="apple-import-progress" class="initial-loading" hidden>
+                    <p id="apple-import-progress-text" class="hint"></p>
+                    <div class="progress-bar">
+                        <div id="apple-import-progress-bar" class="progress-bar-fill"></div>
+                    </div>
+                </div>
+                <div id="apple-import-preview"></div>
+            </section>
             <section id="apple-section-form" class="app-section" hidden>
                 <div>
                     <h2>Apple 인앱 상품 등록/수정</h2>
@@ -823,8 +860,19 @@
                             </select>
                         </label>
                         <label>
-                            가격 티어
-                            <select id="apple-price-tier" name="price_tier"></select>
+                            가격 (Price Schedule - KRW)
+                            <input
+                                type="number"
+                                id="apple-price-krw"
+                                name="price_krw"
+                                list="apple-price-krw-options"
+                                placeholder="희망 KRW 가격을 입력하세요"
+                                min="0"
+                                step="1"
+                                inputmode="numeric"
+                            />
+                            <datalist id="apple-price-krw-options"></datalist>
+                            <p class="hint" id="apple-price-krw-hint" hidden></p>
                         </label>
                         <label>
                             기준 판매 지역
@@ -853,6 +901,137 @@
                     <div id="apple-form-status" class="status"></div>
                 </form>
             </section>
+            <section id="apple-section-cleanup" class="app-section" hidden>
+                <div>
+                    <h2>IAP 정리</h2>
+                    <p class="hint">Google Play에는 없지만 App Store에만 존재하는 IAP 목록을 확인하고 처리할 수 있습니다. SKU 패턴이 일치하는 경우 같은 상품으로 취급됩니다 (예: aos_dg_1126_99와 ios_dg_1126_99).</p>
+                    <p class="hint" style="margin-top: 0.5rem; color: #666;">
+                        <strong>판매 중지:</strong> 고객의 신규 구매만 막습니다. 기존 구매자의 접근은 유지됩니다. 운영 중 IAP는 삭제 대신 판매 중지가 안전합니다.<br>
+                        <strong>IAP 삭제:</strong> IAP 항목을 App Store Connect에서 완전히 제거합니다. 되돌릴 수 없고, 같은 productId는 재사용할 수 없습니다.
+                    </p>
+                </div>
+                <div class="cleanup-subtabs" id="apple-cleanup-tabs" style="margin: 1rem 0; display: flex; gap: 0.5rem;">
+                    <button type="button" class="menu-button is-active" data-apple-cleanup-tab="cleanup">판매 중지/삭제 대상</button>
+                    <button type="button" class="menu-button" data-apple-cleanup-tab="protected">보호 목록</button>
+                </div>
+                <div id="apple-cleanup-view-cleanup">
+                <div class="notice" id="apple-cleanup-google-only-container" hidden style="margin-bottom: 1.5rem; padding: 1rem; border: 1px solid #f0c36d; background: #fff7e6; border-radius: 4px;">
+                    <div style="display: flex; align-items: center; margin-bottom: 0.5rem;">
+                        <strong style="font-size: 1rem;">Google Play에만 존재하는 상품 (<span id="apple-cleanup-google-only-count">0</span>개)</strong>
+                    </div>
+                    <p class="hint" style="margin-bottom: 0.75rem;">아래 상품들은 Google Play에는 있지만 App Store에는 존재하지 않습니다. 필요한 경우 App Store에 등록해 주세요.</p>
+                    <div class="table-wrapper" id="apple-cleanup-google-only-table-wrapper">
+                        <table class="iap-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">SKU</th>
+                                    <th scope="col">상태</th>
+                                    <th scope="col">기본 언어</th>
+                                    <th scope="col">기본 제목</th>
+                                </tr>
+                            </thead>
+                            <tbody id="apple-cleanup-google-only-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="table-controls" id="apple-cleanup-controls" style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+                    <div class="table-summary">
+                        <strong>전체:</strong> <span id="apple-cleanup-total">0</span>개 | <strong>선택:</strong> <span id="apple-cleanup-selected">0</span>개
+                    </div>
+                    <div class="table-controls-actions" style="display: flex; gap: 0.75rem; align-items: center;">
+                        <label class="page-size-control" for="apple-cleanup-page-size">
+                            페이지당 표시
+                            <select id="apple-cleanup-page-size">
+                                <option value="50">50개</option>
+                                <option value="100">100개</option>
+                                <option value="200">200개</option>
+                                <option value="all">전체</option>
+                            </select>
+                        </label>
+                        <div class="pagination">
+                            <button type="button" id="apple-cleanup-prev-btn">이전</button>
+                            <span id="apple-cleanup-page-info">1 / 1</span>
+                            <button type="button" id="apple-cleanup-next-btn">다음</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="table-wrapper" id="apple-cleanup-table-wrapper" hidden>
+                    <table class="iap-table">
+                        <thead>
+                            <tr>
+                                <th scope="col" style="width: 40px;">
+                                    <input type="checkbox" id="apple-cleanup-select-all" aria-label="전체 선택" />
+                                </th>
+                                <th scope="col" class="index-column" id="apple-cleanup-index-header" style="cursor: pointer;">인덱스</th>
+                                <th scope="col">상품 ID</th>
+                                <th scope="col">타입</th>
+                                <th scope="col">상태</th>
+                                <th scope="col">가격</th>
+                            </tr>
+                        </thead>
+                        <tbody id="apple-cleanup-table-body"></tbody>
+                    </table>
+                </div>
+                <div id="apple-cleanup-empty-state" class="empty" hidden>
+                    Google Play에 없고 App Store에만 있는 IAP가 없습니다.
+                </div>
+                <div class="form-actions" style="margin-top: 1rem;" id="apple-cleanup-actions" hidden>
+                    <button type="button" id="apple-cleanup-protect-btn" class="button-secondary" style="margin-right: 0.5rem;">보호</button>
+                    <button type="button" id="apple-cleanup-remove-sale-btn" class="button-secondary" style="margin-right: 0.5rem;">판매 중지</button>
+                    <button type="button" id="apple-cleanup-delete-btn" class="button-primary">IAP 삭제</button>
+                </div>
+                </div>
+                <div id="apple-cleanup-view-protected" hidden>
+                    <div class="table-controls" id="apple-protected-controls" style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+                        <div class="table-summary">
+                            <strong>보호 중:</strong> <span id="apple-protected-total">0</span>개 | <strong>선택:</strong> <span id="apple-protected-selected">0</span>개
+                        </div>
+                        <div class="table-controls-actions" style="display: flex; gap: 0.75rem; align-items: center;">
+                            <label class="page-size-control" for="apple-protected-page-size">
+                                페이지당 표시
+                                <select id="apple-protected-page-size">
+                                    <option value="50">50개</option>
+                                    <option value="100">100개</option>
+                                    <option value="200">200개</option>
+                                    <option value="all">전체</option>
+                                </select>
+                            </label>
+                            <div class="pagination">
+                                <button type="button" id="apple-protected-prev-btn">이전</button>
+                                <span id="apple-protected-page-info">1 / 1</span>
+                                <button type="button" id="apple-protected-next-btn">다음</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="table-wrapper" id="apple-protected-table-wrapper" hidden>
+                        <table class="iap-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col" style="width: 40px;">
+                                        <input type="checkbox" id="apple-protected-select-all" aria-label="전체 선택" />
+                                    </th>
+                                    <th scope="col" class="index-column" id="apple-protected-index-header" style="cursor: pointer;">인덱스</th>
+                                    <th scope="col">상품 ID</th>
+                                    <th scope="col">타입</th>
+                                    <th scope="col">상태</th>
+                                    <th scope="col">가격</th>
+                                </tr>
+                            </thead>
+                            <tbody id="apple-protected-table-body"></tbody>
+                        </table>
+                    </div>
+                    <div id="apple-protected-empty-state" class="empty" hidden>
+                        보호된 IAP가 없습니다.
+                    </div>
+                    <div class="form-actions" style="margin-top: 1rem;" id="apple-protected-actions" hidden>
+                        <button type="button" id="apple-protected-unprotect-btn" class="button-secondary">보호 해제</button>
+                    </div>
+                </div>
+                <div class="csv-actions">
+                    <button type="button" id="apple-cleanup-refresh-btn">목록 새로고침</button>
+                </div>
+                <div id="apple-cleanup-status" class="status"></div>
+            </section>
         </section>
     </main>
     <script>
@@ -864,9 +1043,6 @@
                 storePanes.set(store, pane);
             }
         });
-        let activeStore = 'google';
-        document.body.dataset.store = activeStore;
-
         const storeConfigs = {
             google: {
                 defaultSection: 'section-bulk-management',
@@ -885,7 +1061,9 @@
                 pane: storePanes.get('apple'),
                 sections: new Map([
                     ['apple-section-product-list', document.getElementById('apple-section-product-list')],
+                    ['apple-section-bulk-management', document.getElementById('apple-section-bulk-management')],
                     ['apple-section-form', document.getElementById('apple-section-form')],
+                    ['apple-section-cleanup', document.getElementById('apple-section-cleanup')],
                 ]),
             },
         };
@@ -893,6 +1071,34 @@
         const activeSections = {};
         Object.entries(storeConfigs).forEach(([store, config]) => {
             activeSections[store] = config.defaultSection;
+        });
+        
+        let activeStore = null; // 초기에는 스토어 미선택
+        const initialWelcomeScreen = document.getElementById('initial-welcome-screen');
+        const storeSelectButtons = document.querySelectorAll('.store-select-btn');
+        
+        // 초기 화면에서 스토어 선택 시
+        storeSelectButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const targetStore = button.dataset.store;
+                if (targetStore && storeConfigs[targetStore]) {
+                    if (initialWelcomeScreen) {
+                        initialWelcomeScreen.hidden = true;
+                    }
+                    setActiveStore(targetStore);
+                }
+            });
+        });
+        
+        // 초기에는 모든 스토어 pane과 메뉴 숨김
+        Object.entries(storeConfigs).forEach(([key, config]) => {
+            if (config.pane) {
+                config.pane.hidden = true;
+            }
+            if (config.menu) {
+                config.menu.hidden = true;
+                config.menu.classList.remove('is-active');
+            }
         });
 
         function setActiveSection(store, id) {
@@ -919,6 +1125,12 @@
             }
             activeStore = store;
             document.body.dataset.store = store;
+            
+            // 초기 화면 숨김
+            if (initialWelcomeScreen) {
+                initialWelcomeScreen.hidden = true;
+            }
+            
             storeToggleButtons.forEach((button) => {
                 const isActive = button.dataset.store === store;
                 button.classList.toggle('is-active', isActive);
@@ -929,6 +1141,7 @@
                     config.pane.hidden = key !== store;
                 }
                 if (config.menu) {
+                    config.menu.hidden = false;
                     config.menu.classList.toggle('is-active', key === store);
                 }
             });
@@ -2240,13 +2453,16 @@
                 renderTemplateDetails(null);
                 success = true;
             } catch (error) {
-                errorMessage = error.message;
+                errorMessage = error.message || '가격 템플릿을 불러오지 못했습니다.';
+                console.error('Failed to fetch templates:', error);
                 templateSelect.innerHTML = '<option value="">템플릿 로딩 실패</option>';
                 templateSelect.disabled = true;
                 if (submitBtn) {
                     submitBtn.disabled = true;
                 }
-                renderTemplateDetails(null, error.message);
+                renderTemplateDetails(null, errorMessage);
+                // 오류가 발생해도 앱은 계속 사용 가능하도록 함
+                success = false;
             } finally {
                 if (showProgress) {
                     finishInitialStep({ success, message: errorMessage || '가격 템플릿을 불러오지 못했습니다.' });
@@ -2418,6 +2634,7 @@
         });
 
         const appleRefreshBtn = document.getElementById('apple-refresh-btn');
+        const appleFixBtn = document.getElementById('apple-fix-btn');
         const appleStatusEl = document.getElementById('apple-status');
         const appleLoadingEl = document.getElementById('apple-loading');
         const appleLoadingBar = document.getElementById('apple-loading-bar');
@@ -2430,11 +2647,26 @@
         const appleBulkDeleteApplyBtn = document.getElementById('apple-bulk-delete-apply-btn');
         const appleBulkDeleteStatus = document.getElementById('apple-bulk-delete-status');
         const appleBulkDeleteResults = document.getElementById('apple-bulk-delete-results');
+        
+        // Apple CSV 벌크 관리 관련 요소
+        const appleSampleDownloadBtn = document.getElementById('apple-sample-download-btn');
+        const appleImportFile = document.getElementById('apple-import-file');
+        const appleImportPreviewBtn = document.getElementById('apple-import-preview-btn');
+        const appleImportApplyBtn = document.getElementById('apple-import-apply-btn');
+        const appleImportStatus = document.getElementById('apple-import-status');
+        const appleImportProgress = document.getElementById('apple-import-progress');
+        const appleImportProgressText = document.getElementById('apple-import-progress-text');
+        const appleImportProgressBar = document.getElementById('apple-import-progress-bar');
+        const appleImportPreview = document.getElementById('apple-import-preview');
+        let pendingAppleOperations = [];
+        
         const appleForm = document.getElementById('apple-form');
         const appleProductIdInput = document.getElementById('apple-product-id');
         const appleReferenceNameInput = document.getElementById('apple-reference-name');
         const applePurchaseTypeSelect = document.getElementById('apple-purchase-type');
-        const applePriceTierSelect = document.getElementById('apple-price-tier');
+        const applePriceKrwInput = document.getElementById('apple-price-krw');
+        const applePriceKrwOptions = document.getElementById('apple-price-krw-options');
+        const applePriceKrwHint = document.getElementById('apple-price-krw-hint');
         const appleBaseTerritoryInput = document.getElementById('apple-base-territory');
         const appleClearedForSaleCheckbox = document.getElementById('apple-cleared-for-sale');
         const appleFamilySharableCheckbox = document.getElementById('apple-family-sharable');
@@ -2458,8 +2690,12 @@
         const appleState = {
             initialized: false,
             items: [],
-            priceTiersTerritory: '',
-            priceTiers: [],
+            pricePointsTerritory: '',
+            pricePoints: [],
+            pricePointLookupByTier: {},
+            pricePointLookupByPrice: {},
+            pricePointLookupById: {},
+            selectedPricePoint: null,
             backgroundFetch: {
                 active: false,
                 abortController: null,
@@ -2469,6 +2705,105 @@
             }
         };
         let appleBulkDeleteMatches = [];
+
+        function parseApplePriceInput(value) {
+            if (value === undefined || value === null) return null;
+            const normalized = value.toString().replace(/[^\d]/g, '');
+            if (!normalized) return null;
+            const parsed = Number(normalized);
+            if (Number.isNaN(parsed)) return null;
+            return parsed;
+        }
+
+        function findApplePricePointByTier(tierId) {
+            if (!tierId || !appleState.pricePointLookupByTier) return null;
+            return appleState.pricePointLookupByTier[tierId] || null;
+        }
+
+        function findAppleNearestPricePoint(priceKrw) {
+            if (!Array.isArray(appleState.pricePoints) || !appleState.pricePoints.length) {
+                return null;
+            }
+            const target = Number(priceKrw);
+            if (!Number.isFinite(target)) {
+                return null;
+            }
+            let best = null;
+            let bestDiff = Infinity;
+            appleState.pricePoints.forEach((entry) => {
+                if (!entry || typeof entry !== 'object') return;
+                const priceValue = parseApplePriceInput(entry.customerPrice);
+                if (priceValue === null) return;
+                const diff = Math.abs(priceValue - target);
+                if (diff < bestDiff || (diff === bestDiff && priceValue < (parseApplePriceInput(best?.customerPrice) ?? Infinity))) {
+                    best = entry;
+                    bestDiff = diff;
+                }
+            });
+            if (!best) return null;
+            return {
+                ...best,
+                difference: bestDiff,
+            };
+        }
+
+        function setApplePriceHint(match, typedPrice) {
+            if (!applePriceKrwHint) return;
+            if (!match) {
+                applePriceKrwHint.textContent = '';
+                applePriceKrwHint.hidden = true;
+                applePriceKrwHint.style.color = '';
+                return;
+            }
+            const priceValue = parseApplePriceInput(match.customerPrice);
+            const formatted = priceValue !== null ? priceValue.toLocaleString('ko-KR') : match.customerPrice;
+            let message = `적용 가격: KRW ${formatted}`;
+            const inputPrice = parseApplePriceInput(typedPrice);
+            if (inputPrice !== null && priceValue !== null) {
+                const diff = Math.abs(priceValue - inputPrice);
+                if (diff > 0) {
+                    message += ` (입력값과 ${diff.toLocaleString('ko-KR')} KRW 차이)`;
+                }
+            }
+            if (match.isFallback) {
+                message = `가격 포인트를 불러오지 못해 입력한 금액(KRW ${formatted})으로 저장을 시도합니다.`;
+            }
+            applePriceKrwHint.textContent = message;
+            applePriceKrwHint.hidden = false;
+            applePriceKrwHint.style.color = '';
+        }
+
+        function applyApplePriceInput(value, options = {}) {
+            const { silent = false } = options;
+            const parsed = parseApplePriceInput(value);
+            if (parsed === null) {
+                appleState.selectedPricePoint = null;
+                if (!silent) {
+                    setApplePriceHint(null);
+                }
+                return null;
+            }
+            const match = findAppleNearestPricePoint(parsed);
+            if (match) {
+                appleState.selectedPricePoint = match;
+                if (!silent) {
+                    setApplePriceHint(match, parsed);
+                }
+                return match;
+            }
+            const fallbackPoint = {
+                pricePointId: null,
+                customerPrice: String(parsed),
+                currency: 'KRW',
+                difference: null,
+                isFallback: true,
+            };
+            appleState.selectedPricePoint = fallbackPoint;
+            if (!silent) {
+                setApplePriceHint(fallbackPoint, parsed);
+            }
+            return fallbackPoint;
+        }
 
         function getAppleDefaultLocale() {
             return appleConfig.localization?.defaultLocale || 'en-GB';
@@ -2537,27 +2872,62 @@
             }
         }
 
-        function populateApplePriceTierOptions(tiers) {
-            if (!applePriceTierSelect) return;
-            const currentValue = applePriceTierSelect.value;
-            applePriceTierSelect.innerHTML = '<option value="">티어 선택 안 함</option>';
-            tiers.forEach((tier) => {
-                const option = document.createElement('option');
-                option.value = tier.tier;
-                const priceText = tier.customerPrice && tier.currency ? ` (${tier.currency} ${tier.customerPrice})` : '';
-                option.textContent = `${tier.tier}${priceText}`;
-                applePriceTierSelect.appendChild(option);
+        function populateApplePriceOptions(points) {
+            if (!applePriceKrwOptions) return;
+            appleState.pricePoints = Array.isArray(points) ? points.slice().sort((a, b) => {
+                const priceA = parseApplePriceInput(a?.customerPrice) ?? Infinity;
+                const priceB = parseApplePriceInput(b?.customerPrice) ?? Infinity;
+                return priceA - priceB;
+            }) : [];
+            appleState.pricePointLookupByTier = {};
+            appleState.pricePointLookupByPrice = {};
+            appleState.pricePointLookupById = {};
+            applePriceKrwOptions.innerHTML = '';
+
+            appleState.pricePoints.forEach((point) => {
+                if (!point) return;
+                const { tier, customerPrice, currency, pricePointId } = point;
+                if (tier) {
+                    appleState.pricePointLookupByTier[tier] = point;
+                }
+                const normalizedPrice = parseApplePriceInput(customerPrice);
+                if (normalizedPrice !== null) {
+                    appleState.pricePointLookupByPrice[normalizedPrice] = point;
+                }
+                if (pricePointId) {
+                    appleState.pricePointLookupById[pricePointId] = point;
+                }
+
+                if (currency && customerPrice) {
+                    const option = document.createElement('option');
+                    option.value = `${currency} ${customerPrice}`;
+                    option.label = `티어 ${tier || ''}`.trim();
+                    applePriceKrwOptions.appendChild(option);
+
+                    const numericOption = document.createElement('option');
+                    numericOption.value = customerPrice;
+                    numericOption.label = currency;
+                    applePriceKrwOptions.appendChild(numericOption);
+                } else if (customerPrice) {
+                    const option = document.createElement('option');
+                    option.value = customerPrice;
+                    option.label = tier ? `티어 ${tier}` : customerPrice;
+                    applePriceKrwOptions.appendChild(option);
+                }
             });
-            if (currentValue) {
-                applePriceTierSelect.value = currentValue;
+
+            if (applePriceKrwInput && applePriceKrwInput.value) {
+                applyApplePriceInput(applePriceKrwInput.value, { silent: true });
+            } else {
+                setApplePriceHint(null);
             }
         }
 
-        function formatApplePriceTier(tierId) {
-            if (!tierId || !appleState.priceTiers.length) return tierId || '-';
-            const tier = appleState.priceTiers.find(t => t.tier === tierId);
-            if (tier && tier.customerPrice && tier.currency) {
-                return `${tier.currency} ${tier.customerPrice}`;
+        function formatApplePriceDisplayByTier(tierId) {
+            if (!tierId) return tierId || '-';
+            const point = findApplePricePointByTier(tierId);
+            if (point && point.currency && point.customerPrice) {
+                return `${point.currency} ${point.customerPrice}`;
             }
             return tierId;
         }
@@ -2633,7 +3003,9 @@
                 applePurchaseTypeSelect.disabled = false;
                 applePurchaseTypeSelect.value = applePurchaseTypeSelect.options[0]?.value || 'consumable';
             }
-            if (applePriceTierSelect) applePriceTierSelect.value = '';
+            appleState.selectedPricePoint = null;
+            if (applePriceKrwInput) applePriceKrwInput.value = '';
+            setApplePriceHint(null);
             if (appleBaseTerritoryInput) appleBaseTerritoryInput.value = 'KOR';
             if (appleClearedForSaleCheckbox) appleClearedForSaleCheckbox.checked = true;
             if (appleFamilySharableCheckbox) appleFamilySharableCheckbox.checked = false;
@@ -2681,20 +3053,13 @@
             appleEmptyState.hidden = true;
             items.forEach((item) => {
                 const productId = item.productId || item.sku || '';
-                // Use Korean product name from localizations, fallback to referenceName
-                const displayName = (item.localizations?.['ko']?.name || item.localizations?.['ko-KR']?.name || item.referenceName || '');
-                const referenceName = item.referenceName || '';
                 const type = item.type || '';
                 const state = item.state || '';
-                const priceTier = Array.isArray(item.prices) && item.prices.length ? item.prices[0].priceTier || '' : '';
-                const cleared = item.clearedForSale ? '예' : '아니오';
+                const priceTier = item.priceTier || '';
                 const tr = document.createElement('tr');
                 const idTd = document.createElement('td');
                 idTd.textContent = productId;
                 tr.appendChild(idTd);
-                const nameTd = document.createElement('td');
-                nameTd.textContent = displayName;
-                tr.appendChild(nameTd);
                 const typeTd = document.createElement('td');
                 typeTd.textContent = type;
                 tr.appendChild(typeTd);
@@ -2702,11 +3067,13 @@
                 stateTd.textContent = state;
                 tr.appendChild(stateTd);
                 const tierTd = document.createElement('td');
-                tierTd.textContent = formatApplePriceTier(priceTier);
+                // Prefer displaying KRW price if available, fallback to tier mapping
+                if (item.krwPrice && item.krwPrice.currency && item.krwPrice.customerPrice) {
+                    tierTd.textContent = `${item.krwPrice.currency} ${item.krwPrice.customerPrice}`;
+                } else {
+                    tierTd.textContent = formatApplePriceDisplayByTier(priceTier);
+                }
                 tr.appendChild(tierTd);
-                const clearedTd = document.createElement('td');
-                clearedTd.textContent = cleared;
-                tr.appendChild(clearedTd);
                 const actionsTd = document.createElement('td');
                 const editBtn = document.createElement('button');
                 editBtn.type = 'button';
@@ -2724,24 +3091,51 @@
             });
         }
 
-        async function loadApplePriceTiers(territory = 'KOR', options = {}) {
-            if (!applePriceTierSelect) return;
+        function getAppleItemIdentifier(item) {
+            if (!item || typeof item !== 'object') return '';
+            return item.id || item.productId || item.sku || '';
+        }
+
+        function upsertAppleStateItem(item) {
+            const id = getAppleItemIdentifier(item);
+            if (!id) return;
+
+            const upsertInto = (array, insertAtStart = false) => {
+                if (!Array.isArray(array)) return;
+                const index = array.findIndex((entry) => getAppleItemIdentifier(entry) === id);
+                if (index >= 0) {
+                    array[index] = item;
+                } else if (insertAtStart) {
+                    array.unshift(item);
+                } else {
+                    array.push(item);
+                }
+            };
+
+            upsertInto(appleState.items, true);
+            if (appleState.backgroundFetch && Array.isArray(appleState.backgroundFetch.items)) {
+                upsertInto(appleState.backgroundFetch.items, true);
+            }
+        }
+
+        async function loadApplePricePoints(territory = 'KOR', options = {}) {
+            if (!applePriceKrwOptions) return;
             const normalized = (territory || 'KOR').trim().toUpperCase();
-            if (!options.force && appleState.priceTiersTerritory === normalized && appleState.priceTiers.length) {
-                populateApplePriceTierOptions(appleState.priceTiers);
+            if (!options.force && appleState.pricePointsTerritory === normalized && appleState.pricePoints.length) {
+                populateApplePriceOptions(appleState.pricePoints);
                 return;
             }
-            applePriceTierSelect.innerHTML = '<option value="">티어 선택 안 함</option>';
+            applePriceKrwOptions.innerHTML = '';
             try {
                 const res = await fetch(`/api/apple/pricing/tiers?territory=${encodeURIComponent(normalized)}`);
                 if (!res.ok) {
                     throw new Error('가격 티어를 불러오지 못했습니다.');
                 }
                 const data = await res.json();
-                const tiers = data.tiers || [];
-                appleState.priceTiersTerritory = normalized;
-                appleState.priceTiers = tiers;
-                populateApplePriceTierOptions(tiers);
+                const pricePoints = data.tiers || [];
+                appleState.pricePointsTerritory = normalized;
+                appleState.pricePoints = pricePoints;
+                populateApplePriceOptions(pricePoints);
             } catch (error) {
                 if (!options.quiet && appleFormStatus) {
                     appleFormStatus.textContent = error.message;
@@ -2913,7 +3307,14 @@
                     renderAppleTable(items);
                     if (appleStatusEl) {
                         if (totalCount) {
-                            appleStatusEl.textContent = `총 ${items.length}/${totalCount}개의 Apple 인앱 상품을 불러왔습니다. (100%)`;
+                            const percent = items.length >= totalCount ? 100 : Math.round((items.length / totalCount) * 100);
+                            if (percent === 100) {
+                                appleStatusEl.textContent = `총 ${items.length}개의 Apple 인앱 상품을 불러왔습니다.`;
+                                // 100%인 경우 progress bar 숨김
+                                if (appleLoadingEl) appleLoadingEl.hidden = true;
+                            } else {
+                                appleStatusEl.textContent = `총 ${items.length}/${totalCount}개의 Apple 인앱 상품을 불러왔습니다. (${percent}%)`;
+                            }
                         } else {
                             appleStatusEl.textContent = `총 ${items.length}개의 Apple 인앱 상품을 불러왔습니다.`;
                         }
@@ -2984,6 +3385,24 @@
                 applePurchaseTypeSelect.disabled = true;
             }
             if (appleFormStatus) appleFormStatus.textContent = '상세 정보를 불러오는 중입니다...';
+            
+            // Progress bar 표시
+            const formProgressEl = document.getElementById('apple-form-progress');
+            if (!formProgressEl) {
+                // Progress bar 요소가 없으면 생성
+                const progressContainer = document.createElement('div');
+                progressContainer.id = 'apple-form-progress';
+                progressContainer.className = 'initial-loading';
+                progressContainer.style.cssText = 'position: relative; z-index: 10; background: white; padding: 10px; margin-bottom: 10px;';
+                progressContainer.innerHTML = '<p class="hint">상세 정보를 불러오는 중입니다...</p><div class="progress-bar"><div class="progress-bar-fill" id="apple-form-progress-bar" style="width: 0%;"></div></div>';
+                if (appleForm && appleForm.parentNode) {
+                    appleForm.parentNode.insertBefore(progressContainer, appleForm);
+                }
+            } else {
+                formProgressEl.hidden = false;
+                const progressBar = document.getElementById('apple-form-progress-bar');
+                if (progressBar) progressBar.style.width = '0%';
+            }
 
             try {
                 const res = await fetch(`/api/apple/inapp/${encodeURIComponent(productId)}/detail`);
@@ -3005,13 +3424,12 @@
                     applePurchaseTypeSelect.value = option ? option.value : applePurchaseTypeSelect.options[0]?.value || 'consumable';
                 }
                 const prices = Array.isArray(detail.prices) ? detail.prices : [];
-                if (applePriceTierSelect) {
-                    const tier = prices.length ? prices[0].priceTier || '' : '';
-                    applePriceTierSelect.value = tier || '';
-                }
+                const selectedTier = prices.length ? prices[0].priceTier || '' : '';
+                const baseTerritory = prices.length ? prices[0].territory || 'KOR' : 'KOR';
+                const krwPriceInfo = detail.krwPrice || {};
+                const krwPriceValue = krwPriceInfo.customerPrice || '';
                 if (appleBaseTerritoryInput) {
-                    const territory = prices.length ? prices[0].territory || 'KOR' : 'KOR';
-                    appleBaseTerritoryInput.value = territory;
+                    appleBaseTerritoryInput.value = baseTerritory;
                 }
                 if (appleClearedForSaleCheckbox) appleClearedForSaleCheckbox.checked = Boolean(detail.clearedForSale);
                 if (appleFamilySharableCheckbox) appleFamilySharableCheckbox.checked = Boolean(detail.familySharable);
@@ -3041,11 +3459,44 @@
                 }
                 if (appleFormStatus) appleFormStatus.textContent = '';
                 if (appleSubmitBtn) appleSubmitBtn.textContent = '저장';
-                if (
-                    applePriceTierSelect &&
-                    appleState.priceTiersTerritory !== (appleBaseTerritoryInput?.value || 'KOR')
-                ) {
-                    loadApplePriceTiers(appleBaseTerritoryInput?.value || 'KOR', { force: true });
+                
+                // Progress bar 숨김
+                const formProgressEl = document.getElementById('apple-form-progress');
+                if (formProgressEl) {
+                    const progressBar = document.getElementById('apple-form-progress-bar');
+                    if (progressBar) progressBar.style.width = '100%';
+                    setTimeout(() => {
+                        formProgressEl.hidden = true;
+                        if (progressBar) progressBar.style.width = '0%';
+                    }, 300);
+                }
+                const territoryValue = (appleBaseTerritoryInput?.value || 'KOR').trim().toUpperCase();
+                const applyPrice = () => {
+                    appleState.selectedPricePoint = null;
+                    if (applePriceKrwInput) {
+                        if (krwPriceValue) {
+                            applePriceKrwInput.value = krwPriceValue;
+                            applyApplePriceInput(krwPriceValue);
+                        } else if (selectedTier) {
+                            const point = findApplePricePointByTier(selectedTier);
+                            if (point && point.customerPrice) {
+                                applePriceKrwInput.value = point.customerPrice;
+                                appleState.selectedPricePoint = point;
+                                setApplePriceHint(point, point.customerPrice);
+                            } else {
+                                applePriceKrwInput.value = '';
+                                setApplePriceHint(null);
+                            }
+                        } else {
+                            applePriceKrwInput.value = '';
+                            setApplePriceHint(null);
+                        }
+                    }
+                };
+                if (appleState.pricePointsTerritory !== territoryValue) {
+                    loadApplePricePoints(territoryValue, { force: true }).then(applyPrice);
+                } else {
+                    applyPrice();
                 }
             } catch (error) {
                 if (appleFormStatus) appleFormStatus.textContent = error.message;
@@ -3070,7 +3521,9 @@
                 if (appleForm && appleForm.dataset.productId === productId) {
                     resetAppleForm();
                 }
-                fetchAppleList({ refresh: true });
+                // 삭제 성공 시 캐시에서만 제거 (full fetch 하지 않음)
+                appleState.items = appleState.items.filter(i => (i.productId || i.sku) !== productId);
+                renderAppleTable();
             } catch (error) {
                 if (appleStatusEl) appleStatusEl.textContent = error.message;
             }
@@ -3092,10 +3545,9 @@
             thead.innerHTML = `
                 <tr>
                     <th scope="col">Product ID</th>
-                    <th scope="col">참조 이름</th>
                     <th scope="col">타입</th>
                     <th scope="col">상태</th>
-                    <th scope="col">가격 티어</th>
+                    <th scope="col">가격</th>
                     <th scope="col">일치 값</th>
                 </tr>
             `;
@@ -3104,17 +3556,24 @@
             matches.forEach((match) => {
                 const tr = document.createElement('tr');
                 const productId = match.productId || match.sku || '';
-                const referenceName = match.referenceName || '';
                 const type = match.type || '';
                 const state = match.state || '';
                 const priceTier = Array.isArray(match.prices) && match.prices.length ? match.prices[0].priceTier || '' : '';
                 const matchedValue = match.matchedValue || '';
+                
+                // Display KRW price if available, otherwise fallback to tier
+                let priceDisplay = '-';
+                if (match.krwPrice && match.krwPrice.currency && match.krwPrice.customerPrice) {
+                    priceDisplay = `${match.krwPrice.currency} ${match.krwPrice.customerPrice}`;
+                } else if (priceTier) {
+                    priceDisplay = formatApplePriceDisplayByTier(priceTier);
+                }
+                
                 tr.innerHTML = `
                     <td>${productId || '-'}</td>
-                    <td>${referenceName || '-'}</td>
                     <td>${type || '-'}</td>
                     <td>${state || '-'}</td>
-                    <td>${priceTier || '-'}</td>
+                    <td>${priceDisplay}</td>
                     <td>${matchedValue || '-'}</td>
                 `;
                 tbody.appendChild(tr);
@@ -3217,11 +3676,26 @@
                         ? `${deleted}개의 상품을 삭제하고 ${failed}개의 상품은 삭제하지 못했습니다.`
                         : `${deleted}개의 상품을 삭제했습니다.`;
                 }
+                // 삭제 성공 시 캐시에서만 제거 (full fetch 하지 않음)
+                if (deleted > 0 && appleState.items) {
+                    const deletedProductIds = new Set(
+                        items.filter((item, idx) => {
+                            // Check if this item was successfully deleted
+                            const failedItems = summary.failed || [];
+                            const isFailed = failedItems.some(f => f.product_id === item.product_id);
+                            return !isFailed;
+                        }).map(item => item.product_id).filter(Boolean)
+                    );
+                    appleState.items = appleState.items.filter(i => {
+                        const pid = i.productId || i.sku;
+                        return !deletedProductIds.has(pid);
+                    });
+                    renderAppleTable(appleState.items);
+                }
                 appleBulkDeleteMatches = [];
                 renderAppleBulkDeleteResults([]);
                 if (appleBulkDeleteInput) appleBulkDeleteInput.value = '';
                 if (appleBulkDeleteApplyBtn) appleBulkDeleteApplyBtn.disabled = true;
-                fetchAppleList({ refresh: true });
             } catch (error) {
                 if (appleBulkDeleteStatus) appleBulkDeleteStatus.textContent = error.message;
                 appleBulkDeleteApplyBtn.disabled = false;
@@ -3251,12 +3725,36 @@
                 if (appleFormStatus) appleFormStatus.textContent = '최소 1개의 현지화를 입력해주세요.';
                 return;
             }
+            const priceInputRaw = (applePriceKrwInput?.value || '').trim();
+            const parsedPrice = parseApplePriceInput(priceInputRaw);
+            if (!priceInputRaw) {
+                if (appleFormStatus) appleFormStatus.textContent = '가격(KRW)을 입력해주세요.';
+                applePriceKrwInput?.focus();
+                return;
+            }
+            if (priceInputRaw && parsedPrice === null) {
+                if (appleFormStatus) appleFormStatus.textContent = '가격은 숫자만 입력할 수 있습니다.';
+                applePriceKrwInput?.focus();
+                return;
+            }
+            const matchedPricePoint = appleState.selectedPricePoint || applyApplePriceInput(priceInputRaw);
+            if (!matchedPricePoint) {
+                if (appleFormStatus) appleFormStatus.textContent = '사용 가능한 가격 포인트를 찾을 수 없습니다.';
+                applePriceKrwInput?.focus();
+                return;
+            }
+            const resolvedPrice = parseApplePriceInput(
+                matchedPricePoint.customerPrice !== undefined ? matchedPricePoint.customerPrice : parsedPrice
+            );
+            const pricePointId = matchedPricePoint.pricePointId || null;
+
             const basePayload = {
                 reference_name: referenceName,
                 cleared_for_sale: Boolean(appleClearedForSaleCheckbox?.checked),
                 family_sharable: Boolean(appleFamilySharableCheckbox?.checked),
                 review_note: (appleReviewNoteInput?.value || '').trim() || null,
-                price_tier: (applePriceTierSelect?.value || '').trim() || null,
+                price_krw: resolvedPrice ?? parsedPrice,
+                price_point_id: pricePointId,
                 base_territory: (appleBaseTerritoryInput?.value || 'KOR').trim().toUpperCase(),
                 localizations,
             };
@@ -3269,7 +3767,8 @@
                 cleared_for_sale: basePayload.cleared_for_sale,
                 family_sharable: basePayload.family_sharable,
                 review_note: basePayload.review_note,
-                price_tier: basePayload.price_tier,
+                price_krw: basePayload.price_krw,
+                price_point_id: basePayload.price_point_id,
                 base_territory: basePayload.base_territory,
                 localizations,
             };
@@ -3294,16 +3793,27 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
                 });
+                const responseData = await res.json().catch(() => ({}));
                 if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    const detail = Array.isArray(err.detail)
-                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
-                        : err.detail || err.message;
+                    const detail = Array.isArray(responseData?.detail)
+                        ? responseData.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : responseData?.detail || responseData?.message;
                     throw new Error(detail || '요청이 실패했습니다.');
                 }
                 if (appleFormStatus) appleFormStatus.textContent = '저장되었습니다.';
                 resetAppleForm();
-                fetchAppleList({ refresh: true });
+                const createdItem = responseData?.item;
+                if (createdItem && typeof createdItem === 'object') {
+                    upsertAppleStateItem(createdItem);
+                }
+                // 수정 후 목록 새로고침하여 캐시된 최신 정보 반영
+                if (mode === 'edit') {
+                    // 수정 모드인 경우 목록 새로고침 (캐시된 최신 정보 반영)
+                    await fetchAppleList({ refresh: false });
+                } else {
+                    // 생성 모드인 경우 기존 로직 유지
+                    renderAppleTable();
+                }
             } catch (error) {
                 if (appleFormStatus) appleFormStatus.textContent = error.message;
             } finally {
@@ -3320,8 +3830,8 @@
             }
             appleState.initialized = true;
             resetAppleForm();
-            loadApplePriceTiers(appleBaseTerritoryInput?.value || 'KOR', { quiet: true });
-            fetchAppleList({ refresh: true });
+            loadApplePricePoints(appleBaseTerritoryInput?.value || 'KOR', { quiet: true });
+            fetchAppleList();
             loadAppleConfig().then(() => {
                 resetAppleForm();
             });
@@ -3347,6 +3857,370 @@
         });
 
         appleRefreshBtn?.addEventListener('click', () => fetchAppleList({ refresh: true }));
+        
+        // Fix 버튼: 빈 데이터가 있는 IAP만 fetch (병렬 처리)
+        async function handleAppleFix() {
+            if (!appleFixBtn) return;
+            const items = appleState.items || [];
+            const itemsToFix = items.filter(item => {
+                const productId = item.productId || item.sku || '';
+                const type = item.type || '';
+                const state = item.state || '';
+                const priceTier = item.priceTier || '';
+                const krwPrice = item.krwPrice;
+                // 빈 데이터가 있는 항목만 선택
+                return !productId || !type || !state || (!priceTier && !krwPrice);
+            });
+            
+            if (itemsToFix.length === 0) {
+                if (appleStatusEl) appleStatusEl.textContent = '수정할 항목이 없습니다.';
+                return;
+            }
+            
+            if (appleStatusEl) appleStatusEl.textContent = `${itemsToFix.length}개의 항목을 수정하는 중...`;
+            if (appleLoadingEl) appleLoadingEl.hidden = false;
+            if (appleLoadingBar) appleLoadingBar.style.width = '0%';
+            
+            // 병렬 처리 (최대 10개씩 동시 처리)
+            const BATCH_SIZE = 10;
+            let fixed = 0;
+            let failed = 0;
+            
+            for (let i = 0; i < itemsToFix.length; i += BATCH_SIZE) {
+                const batch = itemsToFix.slice(i, i + BATCH_SIZE);
+                
+                // 배치 병렬 처리
+                const promises = batch.map(async (item) => {
+                    const productId = item.productId || item.sku || '';
+                    if (!productId) return { success: false, productId };
+                    
+                    try {
+                        // Fix 버튼에서는 가격 정보만 가져오고 proceeds/tier는 제외
+                        const res = await fetch(`/api/apple/inapp/${encodeURIComponent(productId)}/detail?skip_price_details=true`);
+                        if (res.ok) {
+                            return { success: true, productId };
+                        } else {
+                            return { success: false, productId };
+                        }
+                    } catch (error) {
+                        console.error(`Failed to fix item ${productId}:`, error);
+                        return { success: false, productId };
+                    }
+                });
+                
+                const results = await Promise.all(promises);
+                
+                // 결과 집계
+                results.forEach(result => {
+                    if (result.success) {
+                        fixed++;
+                    } else {
+                        failed++;
+                    }
+                });
+                
+                // 진행률 업데이트
+                const processed = i + batch.length;
+                const percent = Math.round((processed / itemsToFix.length) * 100);
+                if (appleLoadingBar) appleLoadingBar.style.width = `${percent}%`;
+                if (appleStatusEl) {
+                    appleStatusEl.textContent = `수정 중... ${processed}/${itemsToFix.length}개 (${percent}%) - 성공: ${fixed}, 실패: ${failed}`;
+                }
+            }
+            
+            // 목록 다시 불러오기 (캐시된 최신 정보 반영)
+            await fetchAppleList({ refresh: false });
+            if (appleStatusEl) appleStatusEl.textContent = `${fixed}개의 항목을 수정했습니다.${failed > 0 ? ` (${failed}개 실패)` : ''}`;
+            if (appleLoadingEl) appleLoadingEl.hidden = true;
+        }
+        appleFixBtn?.addEventListener('click', handleAppleFix);
+        
+        // Apple CSV 벌크 등록 기능
+        async function handleAppleSampleDownload() {
+            if (!appleSampleDownloadBtn) return;
+            try {
+                appleSampleDownloadBtn.disabled = true;
+                const res = await fetch('/api/apple/inapp/bulk-create/sample');
+                if (!res.ok) {
+                    throw new Error('샘플 CSV 다운로드에 실패했습니다.');
+                }
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const contentDisposition = res.headers.get('Content-Disposition');
+                let filename = 'apple-iap-bulk-create-sample.csv';
+                if (contentDisposition) {
+                    const match = contentDisposition.match(/filename="?([^"]+)"?/);
+                    if (match) {
+                        filename = match[1];
+                    }
+                }
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                if (appleImportStatus) appleImportStatus.textContent = '샘플 CSV 파일을 다운로드했습니다.';
+            } catch (error) {
+                if (appleImportStatus) appleImportStatus.textContent = error.message;
+            } finally {
+                if (appleSampleDownloadBtn) appleSampleDownloadBtn.disabled = false;
+            }
+        }
+        
+        async function handleAppleImportPreview() {
+            if (!appleImportPreviewBtn || !appleImportFile) return;
+            const file = appleImportFile.files[0];
+            if (!file) {
+                if (appleImportStatus) appleImportStatus.textContent = 'CSV 파일을 선택해주세요.';
+                return;
+            }
+            
+            appleImportPreviewBtn.disabled = true;
+            if (appleImportApplyBtn) appleImportApplyBtn.disabled = true;
+            if (appleImportStatus) appleImportStatus.textContent = 'CSV 파일을 분석하는 중...';
+            if (appleImportPreview) appleImportPreview.innerHTML = '';
+            
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const res = await fetch('/api/apple/inapp/import/preview', {
+                    method: 'POST',
+                    body: formData,
+                });
+                
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail || err.message;
+                    throw new Error(detail || 'CSV 파일 분석에 실패했습니다.');
+                }
+                
+                const data = await res.json();
+                pendingAppleOperations = data.operations || [];
+                
+                // 미리보기 렌더링
+                renderAppleImportPreview(data, appleImportPreview);
+                
+                if (appleImportStatus) {
+                    const summary = data.summary || {};
+                    const parts = [];
+                    if (summary.create) parts.push(`등록 예정 ${summary.create}건`);
+                    if (summary.duplicate) parts.push(`중복 무시 ${summary.duplicate}건`);
+                    if (summary.invalid) parts.push(`오류 ${summary.invalid}건`);
+                    appleImportStatus.textContent = parts.length 
+                        ? parts.join(', ') + '입니다.'
+                        : '등록할 항목이 없습니다.';
+                }
+                
+                // 중복 및 오류 항목 표시
+                if (data.duplicate_items && data.duplicate_items.length > 0) {
+                    const duplicateMsg = document.createElement('p');
+                    duplicateMsg.className = 'hint';
+                    duplicateMsg.style.color = '#ff9800';
+                    duplicateMsg.textContent = `중복 항목 (무시됨): ${data.duplicate_items.map(item => item.product_id).join(', ')}`;
+                    if (appleImportPreview) {
+                        appleImportPreview.insertBefore(duplicateMsg, appleImportPreview.firstChild);
+                    }
+                }
+                if (data.invalid_items && data.invalid_items.length > 0) {
+                    const invalidMsg = document.createElement('p');
+                    invalidMsg.className = 'hint';
+                    invalidMsg.style.color = '#f44336';
+                    invalidMsg.textContent = `오류 항목: ${data.invalid_items.map(item => `${item.product_id || 'N/A'} (${item.reason})`).join(', ')}`;
+                    if (appleImportPreview) {
+                        appleImportPreview.insertBefore(invalidMsg, appleImportPreview.firstChild);
+                    }
+                }
+                
+                if (appleImportApplyBtn) {
+                    appleImportApplyBtn.disabled = !pendingAppleOperations.length;
+                }
+            } catch (error) {
+                if (appleImportStatus) appleImportStatus.textContent = error.message;
+                if (appleImportPreview) appleImportPreview.innerHTML = '';
+                pendingAppleOperations = [];
+            } finally {
+                appleImportPreviewBtn.disabled = false;
+            }
+        }
+        
+        function renderAppleImportPreview(data, targetElement) {
+            if (!targetElement) return;
+            // Clear existing content but keep duplicate/invalid messages if they exist
+            const existingMessages = targetElement.querySelectorAll('.hint[style*="color"]');
+            targetElement.innerHTML = '';
+            existingMessages.forEach(msg => targetElement.appendChild(msg));
+            
+            const operations = data?.operations || [];
+            const summary = data?.summary || {};
+            
+            if (!operations.length) {
+                const message = document.createElement('p');
+                message.className = 'hint';
+                message.textContent = '등록할 항목이 없습니다.';
+                targetElement.appendChild(message);
+                return;
+            }
+            
+            const summaryText = document.createElement('p');
+            summaryText.className = 'operation-header';
+            summaryText.textContent = `등록 예정: ${operations.length}건`;
+            targetElement.appendChild(summaryText);
+            
+            const groupSection = document.createElement('div');
+            groupSection.className = 'preview-group';
+            const heading = document.createElement('h3');
+            heading.textContent = `등록 예정 (${operations.length})`;
+            groupSection.appendChild(heading);
+            const list = document.createElement('ul');
+            list.className = 'operation-list';
+            
+            operations.forEach((op) => {
+                const item = document.createElement('li');
+                item.className = 'operation-create';
+                const header = document.createElement('div');
+                header.className = 'operation-header';
+                const strong = document.createElement('strong');
+                strong.textContent = op.product_id || 'Unknown';
+                header.appendChild(strong);
+                
+                if (op.data) {
+                    const refName = op.data.reference_name || '';
+                    if (refName) {
+                        header.appendChild(document.createTextNode(` - ${refName}`));
+                    }
+                }
+                
+                item.appendChild(header);
+                list.appendChild(item);
+            });
+            
+            groupSection.appendChild(list);
+            targetElement.appendChild(groupSection);
+        }
+        
+        async function handleAppleImportApply() {
+            if (!appleImportApplyBtn || !pendingAppleOperations.length) return;
+            
+            appleImportApplyBtn.disabled = true;
+            if (appleImportStatus) appleImportStatus.textContent = '변경 사항을 적용하는 중...';
+            if (appleImportProgress) appleImportProgress.hidden = false;
+            if (appleImportProgressBar) appleImportProgressBar.style.width = '0%';
+            
+            try {
+                const res = await fetch('/api/apple/inapp/import/apply', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ operations: pendingAppleOperations }),
+                });
+                
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    const detail = Array.isArray(err.detail)
+                        ? err.detail.map((entry) => entry.msg || entry.detail).filter(Boolean).join(', ')
+                        : err.detail || err.message;
+                    throw new Error(detail || '적용에 실패했습니다.');
+                }
+                
+                const data = await res.json();
+                const summary = data.summary || {};
+                const success = data.success_items || [];
+                const failed = data.failed_items || [];
+                const duplicate = data.duplicate_items || [];
+                
+                if (appleImportStatus) {
+                    const parts = [];
+                    if (summary.create) parts.push(`성공 ${summary.create}건`);
+                    if (summary.duplicate) parts.push(`중복 무시 ${summary.duplicate}건`);
+                    if (summary.failed) parts.push(`실패 ${summary.failed}건`);
+                    appleImportStatus.textContent = parts.length 
+                        ? parts.join(', ') + ' 완료되었습니다.'
+                        : '적용이 완료되었습니다.';
+                }
+                
+                // 결과 상세 표시
+                if (appleImportPreview) {
+                    appleImportPreview.innerHTML = '';
+                    
+                    // 성공 항목
+                    if (success.length > 0) {
+                        const successSection = document.createElement('div');
+                        successSection.className = 'preview-group';
+                        const successHeading = document.createElement('h3');
+                        successHeading.textContent = `성공 (${success.length}건)`;
+                        successHeading.style.color = '#4caf50';
+                        successSection.appendChild(successHeading);
+                        const successList = document.createElement('ul');
+                        successList.className = 'operation-list';
+                        success.forEach(item => {
+                            const li = document.createElement('li');
+                            li.textContent = `${item.product_id} (행 ${item.row})`;
+                            successList.appendChild(li);
+                        });
+                        successSection.appendChild(successList);
+                        appleImportPreview.appendChild(successSection);
+                    }
+                    
+                    // 중복 항목
+                    if (duplicate.length > 0) {
+                        const duplicateSection = document.createElement('div');
+                        duplicateSection.className = 'preview-group';
+                        const duplicateHeading = document.createElement('h3');
+                        duplicateHeading.textContent = `중복 무시 (${duplicate.length}건)`;
+                        duplicateHeading.style.color = '#ff9800';
+                        duplicateSection.appendChild(duplicateHeading);
+                        const duplicateList = document.createElement('ul');
+                        duplicateList.className = 'operation-list';
+                        duplicate.forEach(item => {
+                            const li = document.createElement('li');
+                            li.textContent = `${item.product_id} (행 ${item.row}) - 이미 등록된 상품입니다.`;
+                            duplicateList.appendChild(li);
+                        });
+                        duplicateSection.appendChild(duplicateList);
+                        appleImportPreview.appendChild(duplicateSection);
+                    }
+                    
+                    // 실패 항목
+                    if (failed.length > 0) {
+                        const failedSection = document.createElement('div');
+                        failedSection.className = 'preview-group';
+                        const failedHeading = document.createElement('h3');
+                        failedHeading.textContent = `실패 (${failed.length}건)`;
+                        failedHeading.style.color = '#f44336';
+                        failedSection.appendChild(failedHeading);
+                        const failedList = document.createElement('ul');
+                        failedList.className = 'operation-list';
+                        failed.forEach(item => {
+                            const li = document.createElement('li');
+                            li.textContent = `${item.product_id || 'N/A'} (행 ${item.row}) - ${item.error || '알 수 없는 오류'}`;
+                            failedList.appendChild(li);
+                        });
+                        failedSection.appendChild(failedList);
+                        appleImportPreview.appendChild(failedSection);
+                    }
+                }
+                
+                pendingAppleOperations = [];
+                if (appleImportFile) appleImportFile.value = '';
+                
+                // 목록 새로고침
+                await fetchAppleList({ refresh: false });
+            } catch (error) {
+                if (appleImportStatus) appleImportStatus.textContent = error.message;
+            } finally {
+                appleImportApplyBtn.disabled = false;
+                if (appleImportProgress) appleImportProgress.hidden = true;
+            }
+        }
+        
+        appleSampleDownloadBtn?.addEventListener('click', handleAppleSampleDownload);
+        appleImportPreviewBtn?.addEventListener('click', handleAppleImportPreview);
+        appleImportApplyBtn?.addEventListener('click', handleAppleImportApply);
+        
         appleBulkDeletePreviewBtn?.addEventListener('click', handleAppleBulkDeletePreview);
         appleBulkDeleteApplyBtn?.addEventListener('click', handleAppleBulkDeleteApply);
         appleAddLocaleBtn?.addEventListener('click', () => addAppleLocalization());
@@ -3356,8 +4230,676 @@
         });
         appleBaseTerritoryInput?.addEventListener('change', () => {
             const territory = (appleBaseTerritoryInput.value || 'KOR').trim();
-            loadApplePriceTiers(territory);
+            loadApplePricePoints(territory).then(() => {
+                if (applePriceKrwInput?.value) {
+                    applyApplePriceInput(applePriceKrwInput.value);
+                }
+            });
         });
+        applePriceKrwInput?.addEventListener('input', (event) => {
+            applyApplePriceInput(event.target.value, { silent: true });
+        });
+        applePriceKrwInput?.addEventListener('change', (event) => {
+            applyApplePriceInput(event.target.value);
+        });
+        applePriceKrwInput?.addEventListener('blur', (event) => {
+            applyApplePriceInput(event.target.value);
+        });
+
+        // Apple IAP Cleanup functionality
+        const appleCleanupRefreshBtn = document.getElementById('apple-cleanup-refresh-btn');
+        const appleCleanupTabButtons = document.querySelectorAll('[data-apple-cleanup-tab]');
+        const appleCleanupViewCleanup = document.getElementById('apple-cleanup-view-cleanup');
+        const appleCleanupViewProtected = document.getElementById('apple-cleanup-view-protected');
+        const appleCleanupTableBody = document.getElementById('apple-cleanup-table-body');
+        const appleCleanupTableWrapper = document.getElementById('apple-cleanup-table-wrapper');
+        const appleCleanupEmptyState = document.getElementById('apple-cleanup-empty-state');
+        const appleCleanupStatus = document.getElementById('apple-cleanup-status');
+        const appleCleanupTotal = document.getElementById('apple-cleanup-total');
+        const appleCleanupSelected = document.getElementById('apple-cleanup-selected');
+        const appleCleanupSelectAll = document.getElementById('apple-cleanup-select-all');
+        const appleCleanupRemoveSaleBtn = document.getElementById('apple-cleanup-remove-sale-btn');
+        const appleCleanupDeleteBtn = document.getElementById('apple-cleanup-delete-btn');
+        const appleCleanupProtectBtn = document.getElementById('apple-cleanup-protect-btn');
+        const appleCleanupActions = document.getElementById('apple-cleanup-actions');
+        const appleCleanupGoogleOnlyContainer = document.getElementById('apple-cleanup-google-only-container');
+        const appleCleanupGoogleOnlyCount = document.getElementById('apple-cleanup-google-only-count');
+        const appleCleanupGoogleOnlyBody = document.getElementById('apple-cleanup-google-only-body');
+        const appleCleanupPageSizeSelect = document.getElementById('apple-cleanup-page-size');
+        const appleCleanupPrevBtn = document.getElementById('apple-cleanup-prev-btn');
+        const appleCleanupNextBtn = document.getElementById('apple-cleanup-next-btn');
+        const appleCleanupPageInfo = document.getElementById('apple-cleanup-page-info');
+        const appleCleanupIndexHeader = document.getElementById('apple-cleanup-index-header');
+
+        const appleProtectedTableBody = document.getElementById('apple-protected-table-body');
+        const appleProtectedTableWrapper = document.getElementById('apple-protected-table-wrapper');
+        const appleProtectedEmptyState = document.getElementById('apple-protected-empty-state');
+        const appleProtectedActions = document.getElementById('apple-protected-actions');
+        const appleProtectedSelectAll = document.getElementById('apple-protected-select-all');
+        const appleProtectedSelected = document.getElementById('apple-protected-selected');
+        const appleProtectedUnprotectBtn = document.getElementById('apple-protected-unprotect-btn');
+        const appleProtectedPageSizeSelect = document.getElementById('apple-protected-page-size');
+        const appleProtectedPrevBtn = document.getElementById('apple-protected-prev-btn');
+        const appleProtectedNextBtn = document.getElementById('apple-protected-next-btn');
+        const appleProtectedPageInfo = document.getElementById('apple-protected-page-info');
+        const appleProtectedIndexHeader = document.getElementById('apple-protected-index-header');
+        const appleProtectedTotal = document.getElementById('apple-protected-total');
+
+        const appleCleanupState = {
+            activeTab: 'cleanup',
+            items: [],
+            protectedItems: [],
+            googleOnly: [],
+            checkedIds: new Set(),
+            protectedCheckedIds: new Set(),
+            sortDirection: 'asc',
+            protectedSortDirection: 'asc',
+            pageSize: 50,
+            protectedPageSize: 50,
+            page: 0,
+            protectedPage: 0,
+        };
+
+        function setAppleCleanupTab(tab) {
+            if (!tab || appleCleanupState.activeTab === tab) return;
+            appleCleanupState.activeTab = tab;
+            appleCleanupTabButtons.forEach((button) => {
+                if (button.dataset.appleCleanupTab === tab) {
+                    button.classList.add('is-active');
+                } else {
+                    button.classList.remove('is-active');
+                }
+            });
+            renderAppleCleanupView();
+        }
+
+        function getSortedItems(items, direction) {
+            if (direction === 'desc') {
+                return [...items].reverse();
+            }
+            return [...items];
+        }
+
+        function getPageCount(total, pageSize) {
+            if (pageSize === 'all') {
+                return total > 0 ? 1 : 0;
+            }
+            if (total === 0) return 0;
+            return Math.ceil(total / pageSize);
+        }
+
+        function clampPage(page, pageCount) {
+            if (pageCount === 0) return 0;
+            return Math.min(Math.max(page, 0), pageCount - 1);
+        }
+
+        function renderAppleCleanupView() {
+            if (appleCleanupViewCleanup) {
+                appleCleanupViewCleanup.hidden = appleCleanupState.activeTab !== 'cleanup';
+            }
+            if (appleCleanupViewProtected) {
+                appleCleanupViewProtected.hidden = appleCleanupState.activeTab !== 'protected';
+            }
+
+            if (appleCleanupState.activeTab === 'cleanup') {
+                renderAppleCleanupGoogleOnly();
+                renderAppleCleanupTable();
+                if (appleCleanupActions) {
+                    appleCleanupActions.hidden = appleCleanupState.items.length === 0;
+                }
+            } else {
+                if (appleCleanupGoogleOnlyContainer) {
+                    appleCleanupGoogleOnlyContainer.hidden = true;
+                }
+                renderAppleProtectedTable();
+                if (appleCleanupActions) {
+                    appleCleanupActions.hidden = true;
+                }
+            }
+        }
+
+        function renderAppleCleanupTable() {
+            if (!appleCleanupTableBody || !appleCleanupTableWrapper || !appleCleanupEmptyState) return;
+
+            const items = getSortedItems(appleCleanupState.items, appleCleanupState.sortDirection);
+            const total = items.length;
+            const pageSize = appleCleanupState.pageSize;
+            const pageCount = getPageCount(total, pageSize);
+            appleCleanupState.page = clampPage(appleCleanupState.page, pageCount);
+
+            const pageIndex = pageCount === 0 ? 0 : appleCleanupState.page;
+            const sliceStart = pageSize === 'all' ? 0 : pageIndex * pageSize;
+            const sliceEnd = pageSize === 'all' ? total : sliceStart + pageSize;
+            const pageItems = pageSize === 'all' ? items : items.slice(sliceStart, sliceEnd);
+
+            appleCleanupTableBody.innerHTML = '';
+
+            if (total === 0) {
+                appleCleanupTableWrapper.hidden = true;
+                appleCleanupEmptyState.hidden = false;
+                if (appleCleanupTotal) appleCleanupTotal.textContent = '0';
+                if (appleCleanupSelected) appleCleanupSelected.textContent = '0';
+                if (appleCleanupPageInfo) appleCleanupPageInfo.textContent = '0 / 0';
+                if (appleCleanupPrevBtn) appleCleanupPrevBtn.disabled = true;
+                if (appleCleanupNextBtn) appleCleanupNextBtn.disabled = true;
+                updateCleanupSelectAllState();
+                return;
+            }
+
+            appleCleanupTableWrapper.hidden = false;
+            appleCleanupEmptyState.hidden = true;
+            if (appleCleanupTotal) appleCleanupTotal.textContent = String(total);
+            updateCleanupSelectedCount();
+            updateCleanupSelectAllState();
+
+            pageItems.forEach((item, idx) => {
+                const productId = item.productId || item.sku || '';
+                const type = item.type || '';
+                const state = item.state || '';
+                const isChecked = appleCleanupState.checkedIds.has(productId);
+                const displayIndex = (pageSize === 'all' ? idx : sliceStart + idx) + 1;
+
+                const tr = document.createElement('tr');
+
+                const checkboxTd = document.createElement('td');
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = isChecked;
+                checkbox.dataset.productId = productId;
+                checkbox.addEventListener('change', (e) => {
+                    const pid = e.target.dataset.productId;
+                    if (e.target.checked) {
+                        appleCleanupState.checkedIds.add(pid);
+                    } else {
+                        appleCleanupState.checkedIds.delete(pid);
+                    }
+                    updateCleanupSelectAllState();
+                    updateCleanupSelectedCount();
+                });
+                checkboxTd.appendChild(checkbox);
+                tr.appendChild(checkboxTd);
+
+                const indexTd = document.createElement('td');
+                indexTd.textContent = String(displayIndex);
+                tr.appendChild(indexTd);
+
+                const idTd = document.createElement('td');
+                idTd.textContent = productId;
+                tr.appendChild(idTd);
+
+                const typeTd = document.createElement('td');
+                typeTd.textContent = type;
+                tr.appendChild(typeTd);
+
+                const stateTd = document.createElement('td');
+                stateTd.textContent = state;
+                tr.appendChild(stateTd);
+
+                const priceTd = document.createElement('td');
+                if (item.krwPrice && item.krwPrice.currency && item.krwPrice.customerPrice) {
+                    priceTd.textContent = `${item.krwPrice.currency} ${item.krwPrice.customerPrice}`;
+                } else {
+                    priceTd.textContent = '-';
+                }
+                tr.appendChild(priceTd);
+
+                appleCleanupTableBody.appendChild(tr);
+            });
+
+            if (appleCleanupPageInfo) {
+                const currentDisplay = pageCount === 0 ? 0 : pageIndex + 1;
+                const totalDisplay = pageCount === 0 ? 0 : pageCount;
+                appleCleanupPageInfo.textContent = `${currentDisplay} / ${totalDisplay}`;
+            }
+
+            if (appleCleanupPrevBtn) {
+                appleCleanupPrevBtn.disabled = pageCount <= 1 || pageSize === 'all' || pageIndex === 0;
+            }
+            if (appleCleanupNextBtn) {
+                appleCleanupNextBtn.disabled = pageCount <= 1 || pageSize === 'all' || pageIndex >= pageCount - 1;
+            }
+        }
+
+        function renderAppleCleanupGoogleOnly() {
+            if (!appleCleanupGoogleOnlyContainer || !appleCleanupGoogleOnlyBody || !appleCleanupGoogleOnlyCount) return;
+
+            if (appleCleanupState.activeTab !== 'cleanup' || !appleCleanupState.googleOnly.length) {
+                appleCleanupGoogleOnlyContainer.hidden = true;
+                appleCleanupGoogleOnlyBody.innerHTML = '';
+                appleCleanupGoogleOnlyCount.textContent = '0';
+                return;
+            }
+
+            appleCleanupGoogleOnlyContainer.hidden = false;
+            appleCleanupGoogleOnlyCount.textContent = String(appleCleanupState.googleOnly.length);
+            appleCleanupGoogleOnlyBody.innerHTML = '';
+
+            appleCleanupState.googleOnly.forEach((item) => {
+                const sku = item.sku || '-';
+                const status = item.status || '-';
+                const defaultLanguage = item.default_language || '-';
+                let defaultTitle = '-';
+                if (item.listings) {
+                    const listing = item.listings[defaultLanguage] || Object.values(item.listings)[0];
+                    if (listing && listing.title) {
+                        defaultTitle = listing.title;
+                    }
+                }
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${sku}</td>
+                    <td>${status}</td>
+                    <td>${defaultLanguage}</td>
+                    <td>${defaultTitle}</td>
+                `;
+                appleCleanupGoogleOnlyBody.appendChild(tr);
+            });
+        }
+
+        function renderAppleProtectedTable() {
+            if (!appleProtectedTableBody || !appleProtectedTableWrapper || !appleProtectedEmptyState) return;
+
+            const items = getSortedItems(appleCleanupState.protectedItems, appleCleanupState.protectedSortDirection);
+            const total = items.length;
+            const pageSize = appleCleanupState.protectedPageSize;
+            const pageCount = getPageCount(total, pageSize);
+            appleCleanupState.protectedPage = clampPage(appleCleanupState.protectedPage, pageCount);
+
+            const pageIndex = pageCount === 0 ? 0 : appleCleanupState.protectedPage;
+            const sliceStart = pageSize === 'all' ? 0 : pageIndex * pageSize;
+            const sliceEnd = pageSize === 'all' ? total : sliceStart + pageSize;
+            const pageItems = pageSize === 'all' ? items : items.slice(sliceStart, sliceEnd);
+
+            appleProtectedTableBody.innerHTML = '';
+
+            if (total === 0) {
+                appleProtectedTableWrapper.hidden = true;
+                appleProtectedEmptyState.hidden = false;
+                if (appleProtectedTotal) appleProtectedTotal.textContent = '0';
+                if (appleProtectedSelected) appleProtectedSelected.textContent = '0';
+                if (appleProtectedPageInfo) appleProtectedPageInfo.textContent = '0 / 0';
+                if (appleProtectedPrevBtn) appleProtectedPrevBtn.disabled = true;
+                if (appleProtectedNextBtn) appleProtectedNextBtn.disabled = true;
+                if (appleProtectedActions) appleProtectedActions.hidden = true;
+                updateProtectedSelectAllState();
+                return;
+            }
+
+            appleProtectedTableWrapper.hidden = false;
+            appleProtectedEmptyState.hidden = true;
+            if (appleProtectedTotal) appleProtectedTotal.textContent = String(total);
+            if (appleProtectedActions) appleProtectedActions.hidden = false;
+            updateProtectedSelectedCount();
+            updateProtectedSelectAllState();
+
+            pageItems.forEach((item, idx) => {
+                const productId = item.productId || item.sku || '';
+                const type = item.type || '';
+                const state = item.state || '';
+                const isChecked = appleCleanupState.protectedCheckedIds.has(productId);
+                const displayIndex = (pageSize === 'all' ? idx : sliceStart + idx) + 1;
+
+                const tr = document.createElement('tr');
+
+                const checkboxTd = document.createElement('td');
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = isChecked;
+                checkbox.dataset.productId = productId;
+                checkbox.addEventListener('change', (e) => {
+                    const pid = e.target.dataset.productId;
+                    if (e.target.checked) {
+                        appleCleanupState.protectedCheckedIds.add(pid);
+                    } else {
+                        appleCleanupState.protectedCheckedIds.delete(pid);
+                    }
+                    updateProtectedSelectAllState();
+                    updateProtectedSelectedCount();
+                });
+                checkboxTd.appendChild(checkbox);
+                tr.appendChild(checkboxTd);
+
+                const indexTd = document.createElement('td');
+                indexTd.textContent = String(displayIndex);
+                tr.appendChild(indexTd);
+
+                const idTd = document.createElement('td');
+                idTd.textContent = productId;
+                tr.appendChild(idTd);
+
+                const typeTd = document.createElement('td');
+                typeTd.textContent = type;
+                tr.appendChild(typeTd);
+
+                const stateTd = document.createElement('td');
+                stateTd.textContent = state;
+                tr.appendChild(stateTd);
+
+                const priceTd = document.createElement('td');
+                if (item.krwPrice && item.krwPrice.currency && item.krwPrice.customerPrice) {
+                    priceTd.textContent = `${item.krwPrice.currency} ${item.krwPrice.customerPrice}`;
+                } else {
+                    priceTd.textContent = '-';
+                }
+                tr.appendChild(priceTd);
+
+                appleProtectedTableBody.appendChild(tr);
+            });
+
+            if (appleProtectedPageInfo) {
+                const currentDisplay = pageCount === 0 ? 0 : pageIndex + 1;
+                const totalDisplay = pageCount === 0 ? 0 : pageCount;
+                appleProtectedPageInfo.textContent = `${currentDisplay} / ${totalDisplay}`;
+            }
+
+            if (appleProtectedPrevBtn) {
+                appleProtectedPrevBtn.disabled = pageCount <= 1 || pageSize === 'all' || pageIndex === 0;
+            }
+            if (appleProtectedNextBtn) {
+                appleProtectedNextBtn.disabled = pageCount <= 1 || pageSize === 'all' || pageIndex >= pageCount - 1;
+            }
+        }
+
+        function updateCleanupSelectAllState() {
+            if (!appleCleanupSelectAll) return;
+
+            const total = appleCleanupState.items.length;
+            if (total === 0) {
+                appleCleanupSelectAll.checked = false;
+                appleCleanupSelectAll.indeterminate = false;
+                return;
+            }
+
+            const checkedCount = appleCleanupState.checkedIds.size;
+            if (checkedCount === 0) {
+                appleCleanupSelectAll.checked = false;
+                appleCleanupSelectAll.indeterminate = false;
+            } else if (checkedCount === total) {
+                appleCleanupSelectAll.checked = true;
+                appleCleanupSelectAll.indeterminate = false;
+            } else {
+                appleCleanupSelectAll.checked = false;
+                appleCleanupSelectAll.indeterminate = true;
+            }
+        }
+
+        function updateCleanupSelectedCount() {
+            if (!appleCleanupSelected) return;
+            appleCleanupSelected.textContent = String(appleCleanupState.checkedIds.size);
+        }
+
+        function updateProtectedSelectAllState() {
+            if (!appleProtectedSelectAll) return;
+
+            const total = appleCleanupState.protectedItems.length;
+            if (total === 0) {
+                appleProtectedSelectAll.checked = false;
+                appleProtectedSelectAll.indeterminate = false;
+                return;
+            }
+
+            const checkedCount = appleCleanupState.protectedCheckedIds.size;
+            if (checkedCount === 0) {
+                appleProtectedSelectAll.checked = false;
+                appleProtectedSelectAll.indeterminate = false;
+            } else if (checkedCount === total) {
+                appleProtectedSelectAll.checked = true;
+                appleProtectedSelectAll.indeterminate = false;
+            } else {
+                appleProtectedSelectAll.checked = false;
+                appleProtectedSelectAll.indeterminate = true;
+            }
+        }
+
+        function updateProtectedSelectedCount() {
+            if (!appleProtectedSelected) return;
+            appleProtectedSelected.textContent = String(appleCleanupState.protectedCheckedIds.size);
+        }
+
+        async function fetchAppleCleanupList() {
+            if (!appleCleanupStatus) return;
+
+            appleCleanupStatus.textContent = '목록을 불러오는 중...';
+            appleCleanupStatus.className = 'status';
+
+            try {
+                const res = await fetch('/api/apple/inapp/orphaned');
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.detail || '목록을 불러오는데 실패했습니다.');
+                }
+
+                const data = await res.json();
+                appleCleanupState.items = data.items || [];
+                appleCleanupState.googleOnly = data.googleOnly || [];
+                appleCleanupState.protectedItems = data.protectedItems || [];
+                appleCleanupState.checkedIds.clear();
+                appleCleanupState.protectedCheckedIds.clear();
+                appleCleanupState.page = 0;
+                appleCleanupState.protectedPage = 0;
+
+                appleCleanupStatus.textContent = `총 ${appleCleanupState.items.length}개의 IAP를 찾았습니다.`;
+                appleCleanupStatus.className = 'status';
+
+                renderAppleCleanupView();
+            } catch (error) {
+                appleCleanupStatus.textContent = `오류: ${error.message}`;
+                appleCleanupStatus.className = 'status error';
+                console.error('Failed to fetch orphaned IAPs:', error);
+            }
+        }
+
+        appleCleanupTabButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const tab = button.dataset.appleCleanupTab;
+                setAppleCleanupTab(tab);
+            });
+        });
+
+        appleCleanupSelectAll?.addEventListener('change', (e) => {
+            const checked = e.target.checked;
+            appleCleanupState.checkedIds.clear();
+
+            if (checked) {
+                appleCleanupState.items.forEach((item) => {
+                    const productId = item.productId || item.sku || '';
+                    if (productId) {
+                        appleCleanupState.checkedIds.add(productId);
+                    }
+                });
+            }
+
+            appleCleanupTableBody?.querySelectorAll('input[type="checkbox"][data-product-id]').forEach((checkbox) => {
+                checkbox.checked = checked;
+            });
+
+            updateCleanupSelectedCount();
+            updateCleanupSelectAllState();
+        });
+
+        appleProtectedSelectAll?.addEventListener('change', (e) => {
+            const checked = e.target.checked;
+            appleCleanupState.protectedCheckedIds.clear();
+
+            if (checked) {
+                appleCleanupState.protectedItems.forEach((item) => {
+                    const productId = item.productId || item.sku || '';
+                    if (productId) {
+                        appleCleanupState.protectedCheckedIds.add(productId);
+                    }
+                });
+            }
+
+            appleProtectedTableBody?.querySelectorAll('input[type="checkbox"][data-product-id]').forEach((checkbox) => {
+                checkbox.checked = checked;
+            });
+
+            updateProtectedSelectedCount();
+            updateProtectedSelectAllState();
+        });
+
+        appleCleanupPageSizeSelect?.addEventListener('change', () => {
+            const value = appleCleanupPageSizeSelect.value;
+            appleCleanupState.pageSize = value === 'all' ? 'all' : Number(value);
+            appleCleanupState.page = 0;
+            renderAppleCleanupTable();
+        });
+
+        appleCleanupPrevBtn?.addEventListener('click', () => {
+            if (appleCleanupState.pageSize === 'all') return;
+            if (appleCleanupState.page > 0) {
+                appleCleanupState.page -= 1;
+                renderAppleCleanupTable();
+            }
+        });
+
+        appleCleanupNextBtn?.addEventListener('click', () => {
+            if (appleCleanupState.pageSize === 'all') return;
+            const items = appleCleanupState.items.length;
+            const pageCount = getPageCount(items, appleCleanupState.pageSize);
+            if (appleCleanupState.page < pageCount - 1) {
+                appleCleanupState.page += 1;
+                renderAppleCleanupTable();
+            }
+        });
+
+        appleProtectedPageSizeSelect?.addEventListener('change', () => {
+            const value = appleProtectedPageSizeSelect.value;
+            appleCleanupState.protectedPageSize = value === 'all' ? 'all' : Number(value);
+            appleCleanupState.protectedPage = 0;
+            renderAppleProtectedTable();
+        });
+
+        appleProtectedPrevBtn?.addEventListener('click', () => {
+            if (appleCleanupState.protectedPageSize === 'all') return;
+            if (appleCleanupState.protectedPage > 0) {
+                appleCleanupState.protectedPage -= 1;
+                renderAppleProtectedTable();
+            }
+        });
+
+        appleProtectedNextBtn?.addEventListener('click', () => {
+            if (appleCleanupState.protectedPageSize === 'all') return;
+            const items = appleCleanupState.protectedItems.length;
+            const pageCount = getPageCount(items, appleCleanupState.protectedPageSize);
+            if (appleCleanupState.protectedPage < pageCount - 1) {
+                appleCleanupState.protectedPage += 1;
+                renderAppleProtectedTable();
+            }
+        });
+
+        appleCleanupIndexHeader?.addEventListener('click', () => {
+            appleCleanupState.sortDirection = appleCleanupState.sortDirection === 'asc' ? 'desc' : 'asc';
+            renderAppleCleanupTable();
+        });
+
+        appleProtectedIndexHeader?.addEventListener('click', () => {
+            appleCleanupState.protectedSortDirection = appleCleanupState.protectedSortDirection === 'asc' ? 'desc' : 'asc';
+            renderAppleProtectedTable();
+        });
+
+        appleCleanupRefreshBtn?.addEventListener('click', () => {
+            appleCleanupState.checkedIds.clear();
+            appleCleanupState.protectedCheckedIds.clear();
+            fetchAppleCleanupList();
+        });
+
+        appleCleanupProtectBtn?.addEventListener('click', async () => {
+            const productIds = Array.from(appleCleanupState.checkedIds);
+            if (!productIds.length) {
+                if (appleCleanupStatus) {
+                    appleCleanupStatus.textContent = '보호할 IAP를 선택해주세요.';
+                    appleCleanupStatus.className = 'status error';
+                }
+                return;
+            }
+
+            try {
+                appleCleanupProtectBtn.disabled = true;
+                appleCleanupProtectBtn.textContent = '보호 중...';
+                const res = await fetch('/api/apple/inapp/cleanup/protect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ product_ids: productIds }),
+                });
+                if (!res.ok) {
+                    const error = await res.json().catch(() => ({}));
+                    throw new Error(error.detail || '보호에 실패했습니다.');
+                }
+                appleCleanupState.checkedIds.clear();
+                fetchAppleCleanupList();
+            } catch (error) {
+                if (appleCleanupStatus) {
+                    appleCleanupStatus.textContent = `오류: ${error.message}`;
+                    appleCleanupStatus.className = 'status error';
+                }
+            } finally {
+                appleCleanupProtectBtn.disabled = false;
+                appleCleanupProtectBtn.textContent = '보호';
+            }
+        });
+
+        appleProtectedUnprotectBtn?.addEventListener('click', async () => {
+            const productIds = Array.from(appleCleanupState.protectedCheckedIds);
+            if (!productIds.length) {
+                if (appleCleanupStatus) {
+                    appleCleanupStatus.textContent = '보호 해제할 IAP를 선택해주세요.';
+                    appleCleanupStatus.className = 'status error';
+                }
+                return;
+            }
+
+            try {
+                appleProtectedUnprotectBtn.disabled = true;
+                appleProtectedUnprotectBtn.textContent = '처리 중...';
+                const res = await fetch('/api/apple/inapp/cleanup/unprotect', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ product_ids: productIds }),
+                });
+                if (!res.ok) {
+                    const error = await res.json().catch(() => ({}));
+                    throw new Error(error.detail || '보호 해제에 실패했습니다.');
+                }
+                appleCleanupState.protectedCheckedIds.clear();
+                fetchAppleCleanupList();
+            } catch (error) {
+                if (appleCleanupStatus) {
+                    appleCleanupStatus.textContent = `오류: ${error.message}`;
+                    appleCleanupStatus.className = 'status error';
+                }
+            } finally {
+                appleProtectedUnprotectBtn.disabled = false;
+                appleProtectedUnprotectBtn.textContent = '보호 해제';
+            }
+        });
+
+        appleCleanupRemoveSaleBtn?.addEventListener('click', () => {
+            processAppleCleanup('remove_from_sale', '판매 중지');
+        });
+
+        appleCleanupDeleteBtn?.addEventListener('click', () => {
+            processAppleCleanup('delete', '삭제');
+        });
+
+        // Load cleanup list when section is shown
+        const appleCleanupSection = document.getElementById('apple-section-cleanup');
+        if (appleCleanupSection) {
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (mutation.attributeName === 'hidden') {
+                        if (!appleCleanupSection.hidden && appleCleanupState.items.length === 0) {
+                            fetchAppleCleanupList();
+                        }
+                    }
+                });
+            });
+            observer.observe(appleCleanupSection, { attributes: true });
+        }
+
+        // Initialize cleanup tab view
+        renderAppleCleanupView();
 
         storeToggleButtons.forEach((button) => {
             button.addEventListener('click', () => {
@@ -3394,16 +4936,19 @@
         editForm?.addEventListener('submit', handleEditSubmit);
 
         async function initializeApp() {
-            startInitialLoading(2);
-            await fetchTemplates({ showProgress: true });
-            await fetchList(undefined, { showProgress: true });
+            // IAP 벌크 관리 페이지에서는 자동으로 full fetch하지 않음
+            // 사용자가 명시적으로 새로고침 버튼을 클릭할 때만 fetch
+            // startInitialLoading(2);
+            // await fetchTemplates({ showProgress: true });
+            // await fetchList(undefined, { showProgress: true });
         }
 
         renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, importPreviewEl);
         renderImportPreview({ operations: [], summary: { create: 0, update: 0, delete: 0 } }, newImportPreviewEl);
         renderTemplateDetails(null);
         updateIndexHeaderIndicator();
-        setActiveStore(activeStore);
+        // 초기에는 스토어를 설정하지 않음 (초기 화면 표시)
+        // setActiveStore(activeStore);
         initializeApp();
     </script>
 </body>

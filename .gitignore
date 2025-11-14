@@ -14,3 +14,5 @@ service-account.json
 /jq.exe
 /service_account.json
 /.idea
+/env
+logs/
